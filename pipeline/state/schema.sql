@@ -1,0 +1,15 @@
+CREATE TABLE IF NOT EXISTS pipeline_items (
+    message_id BIGINT NOT NULL,
+    stage VARCHAR(64) NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    error TEXT,
+    PRIMARY KEY (message_id, stage)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pipeline_items_status
+    ON pipeline_items (status);
+
+CREATE INDEX IF NOT EXISTS idx_pipeline_items_updated_at
+    ON pipeline_items (updated_at);

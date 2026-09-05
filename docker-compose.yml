@@ -1,0 +1,84 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-pipeline}
+      POSTGRES_USER: ${POSTGRES_USER:-pipeline}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pipeline}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./pipeline/state/schema.sql:/docker-entrypoint-initdb.d/001_pipeline_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pipeline} -d ${POSTGRES_DB:-pipeline}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-minioadmin123}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_started
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${S3_ACCESS_KEY:-minioadmin} ${S3_SECRET_KEY:-minioadmin123} &&
+      mc mb -p --ignore-existing local/${S3_BUCKET_RAW:-raw} &&
+      mc mb -p --ignore-existing local/${S3_BUCKET_AUDIO:-audio} &&
+      mc mb -p --ignore-existing local/${S3_BUCKET_MATCH:-match} &&
+      mc mb -p --ignore-existing local/${S3_BUCKET_ALIGN:-align} &&
+      mc mb -p --ignore-existing local/${S3_BUCKET_RENDER:-render} &&
+      mc mb -p --ignore-existing local/${S3_BUCKET_REVIEW_QUEUE:-review-queue}
+      "
+
+  n8n:
+    image: n8nio/n8n:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB:-pipeline}
+      DB_POSTGRESDB_USER: ${POSTGRES_USER:-pipeline}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD:-pipeline}
+      N8N_BASIC_AUTH_ACTIVE: ${N8N_BASIC_AUTH_ACTIVE:-true}
+      N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER:-admin}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD:-change-me}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-replace-with-a-long-random-string}
+      N8N_HOST: ${N8N_HOST:-localhost}
+      N8N_PORT: ${N8N_PORT:-5678}
+      N8N_PROTOCOL: http
+      WEBHOOK_URL: http://${N8N_HOST:-localhost}:${N8N_PORT:-5678}/
+      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE:-Africa/Cairo}
+      N8N_DIAGNOSTICS_ENABLED: "false"
+    ports:
+      - "5678:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+volumes:
+  postgres_data:
+  minio_data:
+  n8n_data:
