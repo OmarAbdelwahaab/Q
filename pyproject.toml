@@ -8,7 +8,9 @@ version = "0.1.0"
 description = "Automated Quran video repurposing and publishing pipeline."
 readme = "SPEC.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+  "telethon>=1.39,<2",
+]
 
 [project.optional-dependencies]
 dev = [

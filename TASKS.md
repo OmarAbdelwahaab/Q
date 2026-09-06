@@ -11,10 +11,10 @@ looked up rather than re-derived.
 - [x] `docker-compose.yml` for local dev: n8n + state DB + object storage (MinIO)
 
 ## Phase 1 — Ingestion (SPEC §4.1)
-- [ ] Implement Telegram listener (Telethon/Pyrogram session or Bot API webhook) watching the target channel
-- [ ] On new video message: download to `raw/{message_id}.mp4`, insert state row
-- [ ] Retry/backoff (3 attempts) on download failure; alert + skip on exhaustion
-- [ ] Unit test: mock incoming Telegram message, assert file saved and state updated
+- [x] Implement Telegram listener (Telethon/Pyrogram session or Bot API webhook) watching the target channel
+- [x] On new video message: download to `raw/{message_id}.mp4`, insert state row
+- [x] Retry/backoff (3 attempts) on download failure; alert + skip on exhaustion
+- [x] Unit test: mock incoming Telegram message, assert file saved and state updated
 
 ## Phase 2 — Audio extraction (SPEC §4.2)
 - [ ] ffmpeg wrapper: extract mono 16kHz WAV from raw video
