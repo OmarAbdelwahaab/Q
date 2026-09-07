@@ -22,18 +22,19 @@ looked up rather than re-derived.
 - [x] Unit test with a sample video fixture
 
 ## Phase 3 — Verse recognition & matching (SPEC §4.3)
-- [ ] Integrate ASR (Whisper large-v3 or chosen equivalent) for Arabic transcription
-- [ ] Pull and cache canonical Quran text corpus (Tanzil/quran.com API)
-- [ ] Implement fuzzy match: transcript → canonical ayah range + confidence score
-- [ ] Emit `match/{message_id}.json` per the SPEC §4.3 schema
-- [ ] Unit tests against known audio/expected-ayah fixtures; track match accuracy on the regression set
+- [x] Integrate ASR (Whisper large-v3 or chosen equivalent) for Arabic transcription
+- [x] Pull and cache canonical Quran text corpus (Tanzil/quran.com API)
+- [x] Implement fuzzy match: transcript → canonical ayah range + confidence score
+- [x] Emit `match/{message_id}.json` per the SPEC §4.3 schema
+- [ ] Unit tests against known audio/expected-ayah fixtures; track match accuracy on the regression set (requires the manually verified audio regression set and ASR sandbox credentials)
 
 ## Phase 4 — Word-level alignment (SPEC §4.4)
-- [ ] Integrate `ctc-forced-aligner` (Arabic wav2vec2/MMS model) as the primary aligner
-- [ ] Evaluate `quran-align` as a fallback for clean, studio-style audio; decide whether to maintain both paths
-- [ ] Emit `align/{message_id}.json` per the SPEC §4.4 schema
-- [ ] Compute an alignment coverage/confidence score
-- [ ] Unit tests: timestamps monotonic and within audio duration, against the regression set
+- [x] Integrate `ctc-forced-aligner` (Arabic wav2vec2/MMS model) as the primary aligner
+- [x] Evaluate `quran-align` as a fallback for clean, studio-style audio; decide whether to maintain both paths (not maintained in v1)
+- [x] Emit `align/{message_id}.json` per the SPEC §4.4 schema
+- [x] Compute an alignment coverage/confidence score
+- [ ] Confirm ctc-forced-aligner output file location against a real run
+- [ ] Unit tests: timestamps monotonic and within audio duration, against the regression set (requires real alignment runtime and verified audio fixtures)
 
 ## Phase 5 — QA gate (SPEC §4.5)
 - [ ] Implement the combined threshold check (`match_confidence` + `alignment coverage`), thresholds config-driven

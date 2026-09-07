@@ -39,6 +39,12 @@ class CompositeAlertService:
     async def send_audio_extraction_failure(self, message: str) -> None:
         self._dispatch("audio_extraction_failure", message)
 
+    async def send_recognition_failure(self, message: str) -> None:
+        self._dispatch("recognition_failure", message)
+
+    async def send_alignment_failure(self, message: str) -> None:
+        self._dispatch("alignment_failure", message)
+
     def _dispatch(self, event: str, message: str) -> None:
         self.logger.error("Pipeline failure alert triggered", extra={"event": event, "alert_message": message})
 

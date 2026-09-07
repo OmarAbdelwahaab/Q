@@ -111,3 +111,70 @@ class AudioSettings:
             alert_telegram_chat_id=os.getenv("ALERT_TELEGRAM_CHAT_ID") or None,
             log_level=os.getenv("LOG_LEVEL", "INFO"),
         )
+
+
+@dataclass(slots=True)
+class RecognitionSettings:
+    state_db_path: Path
+    storage_root: Path
+    asr_api_url: str
+    asr_api_key: str | None
+    asr_model_name: str
+    corpus_cache_path: Path
+    corpus_api_base_url: str
+    alert_webhook_url: str | None
+    alert_telegram_bot_token: str | None
+    alert_telegram_chat_id: str | None
+    log_level: str
+
+    @classmethod
+    def from_env(cls) -> "RecognitionSettings":
+        project_root = Path(os.getenv("PIPELINE_PROJECT_ROOT", Path.cwd()))
+        storage_root = Path(os.getenv("PIPELINE_STORAGE_ROOT", project_root)).resolve()
+        return cls(
+            state_db_path=Path(os.getenv("STATE_DB_PATH", str(project_root / "pipeline" / "state" / "pipeline.db"))).resolve(),
+            storage_root=storage_root,
+            asr_api_url=os.getenv("ASR_API_URL", ""),
+            asr_api_key=os.getenv("ASR_API_KEY") or None,
+            asr_model_name=os.getenv("ASR_MODEL_NAME", "whisper-large-v3"),
+            corpus_cache_path=Path(os.getenv("QURAN_CORPUS_CACHE_PATH", str(storage_root / "corpus" / "quran-uthmani.json"))).resolve(),
+            corpus_api_base_url=os.getenv("QURAN_CORPUS_API_BASE_URL", "https://api.quran.com/api/v4/quran/verses/uthmani"),
+            alert_webhook_url=os.getenv("ALERT_WEBHOOK_URL") or None,
+            alert_telegram_bot_token=os.getenv("ALERT_TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or None,
+            alert_telegram_chat_id=os.getenv("ALERT_TELEGRAM_CHAT_ID") or None,
+            log_level=os.getenv("LOG_LEVEL", "INFO"),
+        )
+
+
+@dataclass(slots=True)
+class AlignmentSettings:
+    state_db_path: Path
+    storage_root: Path
+    aligner_binary: str
+    alignment_model: str
+    alignment_device: str
+    alignment_batch_size: int
+    alert_webhook_url: str | None
+    alert_telegram_bot_token: str | None
+    alert_telegram_chat_id: str | None
+    log_level: str
+
+    @classmethod
+    def from_env(cls) -> "AlignmentSettings":
+        project_root = Path(os.getenv("PIPELINE_PROJECT_ROOT", Path.cwd()))
+        storage_root = Path(os.getenv("PIPELINE_STORAGE_ROOT", project_root)).resolve()
+        batch_size = _read_int("ALIGNMENT_BATCH_SIZE", 4) or 4
+        if batch_size < 1:
+            raise ValueError("ALIGNMENT_BATCH_SIZE must be positive.")
+        return cls(
+            state_db_path=Path(os.getenv("STATE_DB_PATH", str(project_root / "pipeline" / "state" / "pipeline.db"))).resolve(),
+            storage_root=storage_root,
+            aligner_binary=os.getenv("CTC_ALIGNER_BINARY", "ctc-forced-aligner"),
+            alignment_model=os.getenv("CTC_ALIGNMENT_MODEL", "jonatasgrosman/wav2vec2-large-xlsr-53-arabic"),
+            alignment_device=os.getenv("CTC_ALIGNMENT_DEVICE", "cuda"),
+            alignment_batch_size=batch_size,
+            alert_webhook_url=os.getenv("ALERT_WEBHOOK_URL") or None,
+            alert_telegram_bot_token=os.getenv("ALERT_TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or None,
+            alert_telegram_chat_id=os.getenv("ALERT_TELEGRAM_CHAT_ID") or None,
+            log_level=os.getenv("LOG_LEVEL", "INFO"),
+        )
