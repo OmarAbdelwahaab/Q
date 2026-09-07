@@ -17,9 +17,9 @@ looked up rather than re-derived.
 - [x] Unit test: mock incoming Telegram message, assert file saved and state updated
 
 ## Phase 2 — Audio extraction (SPEC §4.2)
-- [ ] ffmpeg wrapper: extract mono 16kHz WAV from raw video
-- [ ] Handle edge cases: missing/short audio track, corrupted file
-- [ ] Unit test with a sample video fixture
+- [x] ffmpeg wrapper: extract mono 16kHz WAV from raw video
+- [x] Handle edge cases: missing/short audio track, corrupted file
+- [x] Unit test with a sample video fixture
 
 ## Phase 3 — Verse recognition & matching (SPEC §4.3)
 - [ ] Integrate ASR (Whisper large-v3 or chosen equivalent) for Arabic transcription

@@ -68,6 +68,12 @@ class IngestionTests(unittest.IsolatedAsyncioTestCase):
             assert state_row is not None
             self.assertEqual(state_row["status"], "completed")
             self.assertIsNone(state_row["error"])
+            metadata = state_repository.fetch_message_metadata(101)
+            self.assertIsNotNone(metadata)
+            assert metadata is not None
+            self.assertEqual(metadata["channel_id"], "-1001234567890")
+            self.assertEqual(metadata["message_timestamp"], "2026-09-06T00:00:00+00:00")
+            self.assertEqual(metadata["duration_seconds"], 42.0)
             self.assertEqual(alert_service.messages, [])
 
     async def test_failed_download_retries_three_times_and_alerts(self) -> None:

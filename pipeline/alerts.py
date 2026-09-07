@@ -15,6 +15,9 @@ class AlertService(Protocol):
     async def send_ingestion_failure(self, message: str) -> None:
         """Send an alert for an ingestion failure."""
 
+    async def send_audio_extraction_failure(self, message: str) -> None:
+        """Send an alert for an audio extraction failure."""
+
 
 class CompositeAlertService:
     """Dispatch alerts to any configured channels and always log them."""
@@ -31,10 +34,16 @@ class CompositeAlertService:
         self.logger = get_logger(__name__, service="alerts")
 
     async def send_ingestion_failure(self, message: str) -> None:
-        self.logger.error("Ingestion failure alert triggered", extra={"alert_message": message})
+        self._dispatch("ingestion_failure", message)
+
+    async def send_audio_extraction_failure(self, message: str) -> None:
+        self._dispatch("audio_extraction_failure", message)
+
+    def _dispatch(self, event: str, message: str) -> None:
+        self.logger.error("Pipeline failure alert triggered", extra={"event": event, "alert_message": message})
 
         if self.webhook_url:
-            self._post_json(self.webhook_url, {"text": message, "event": "ingestion_failure"})
+            self._post_json(self.webhook_url, {"text": message, "event": event})
 
         if self.telegram_bot_token and self.telegram_chat_id:
             encoded_message = urllib.parse.urlencode(

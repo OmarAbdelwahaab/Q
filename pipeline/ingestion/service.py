@@ -13,6 +13,15 @@ from pipeline.storage import DownloadToPath, LocalArtifactStorage
 
 
 class StateRepository(Protocol):
+    def upsert_message_metadata(
+        self,
+        message_id: int,
+        channel_id: int | str,
+        timestamp: datetime,
+        duration_seconds: int | float | None,
+    ) -> None:
+        """Persist source message metadata."""
+
     def upsert_stage(
         self,
         message_id: int,
@@ -73,6 +82,12 @@ class IngestionService:
 
     async def ingest(self, message: IncomingVideoMessage) -> IngestionResult:
         storage_key = f"raw/{message.message_id}.mp4"
+        self.state_repository.upsert_message_metadata(
+            message_id=message.message_id,
+            channel_id=message.channel_id,
+            timestamp=message.timestamp,
+            duration_seconds=message.duration,
+        )
         self.state_repository.upsert_stage(
             message_id=message.message_id,
             stage=self.stage_name,
