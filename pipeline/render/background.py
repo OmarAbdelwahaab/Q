@@ -86,7 +86,12 @@ class BackgroundAssetPool:
         self._round_robin_counter += 1
         return chosen
 
-    @staticmethod
-    def get_procedural_background_filter(width: int = 1080, height: int = 1920) -> str:
+    DEFAULT_FALLBACK_COLOR: str = "0x0b0e14"
+
+    @classmethod
+    def get_procedural_background_filter(
+        cls, width: int = 1080, height: int = 1920, fps: int = 30
+    ) -> str:
         """FFmpeg filter expression generating a stylized deep architectural dark slate."""
-        return f"color=c=0x0d1117:s={width}x{height}"
+        return f"color=c={cls.DEFAULT_FALLBACK_COLOR}:s={width}x{height}:r={fps}"
+

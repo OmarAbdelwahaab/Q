@@ -10,7 +10,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
 
+from pipeline.render.background import BackgroundAssetPool
+
 CommandRunner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
+
 
 
 class RenderError(RuntimeError):
@@ -111,6 +114,7 @@ class FFmpegRenderer:
         branding_handle: str | None = None,
         branding_position: str = "top_right",
         max_duration_seconds: float | None = None,
+        fonts_dir: Path | None = None,
     ) -> Path:
         """Render complete 1080x1920 H.264 MP4 to output_path."""
         if not audio_path.is_file():
@@ -129,10 +133,12 @@ class FFmpegRenderer:
         # Background input
         use_procedural_background = background_path is None or not background_path.is_file()
         if use_procedural_background:
-            # Procedural dark slate
+            # Reconciled procedural dark slate via BackgroundAssetPool
             command.extend([
                 "-f", "lavfi",
-                "-i", f"color=c=0x0b0e14:s={self.target_width}x{self.target_height}:r=30",
+                "-i", BackgroundAssetPool.get_procedural_background_filter(
+                    self.target_width, self.target_height
+                ),
             ])
         else:
             is_image = background_path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
@@ -161,8 +167,13 @@ class FFmpegRenderer:
                 f"eq=brightness=-0.05:contrast=1.05"
             )
 
-        # Burn-in ASS subtitles
-        vf_filters.append(f"ass=filename='{escaped_ass}'")
+        # Burn-in ASS subtitles with optional fontsdir
+        if fonts_dir and fonts_dir.is_dir():
+            escaped_fontsdir = escape_ffmpeg_filter_path(fonts_dir)
+            vf_filters.append(f"ass=filename='{escaped_ass}':fontsdir='{escaped_fontsdir}'")
+        else:
+            vf_filters.append(f"ass=filename='{escaped_ass}'")
+
 
         # Watermark handle text
         if branding_handle:

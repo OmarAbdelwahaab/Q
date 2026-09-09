@@ -11,10 +11,10 @@ looked up rather than re-derived.
 - [x] `docker-compose.yml` for local dev: n8n + state DB + object storage (MinIO)
 - [x] Add a `.gitignore` (Python cache, venvs, `.env`, local sqlite db) — added; historical `__pycache__` files left tracked intentionally rather than rewriting history
 - [x] Reconcile `pipeline/audio/` — resolved in the Phase 2 commit; source files are now properly tracked alongside their bytecode
-- [x] Decide and document: is the Postgres `pipeline_items` table (provisioned in `docker-compose.yml`/`schema.sql`) the target for later phases, or is SQLite (currently used by `PipelineStateRepository`) staying as-is for longer? — decided and documented in `docs/decisions/001-state-database-strategy.md`: SQLite remains the local default for Phases 1–7; Postgres is the target shared store for Phase 8+ n8n orchestration
+- [ ] Decide and document: is the Postgres `pipeline_items` table (provisioned in `docker-compose.yml`/`schema.sql`) the target for later phases, or is SQLite (currently used by `PipelineStateRepository`) staying as-is for longer? `STATE_DATABASE_URL` is defined in `.env.example` but nothing reads it yet — fine for now, but worth being explicit before more phases build on top of one or the other
 - [x] Commit the Phase 3 and Phase 4 work — done in `c003a9d`
-- [x] **Recurring pattern to fix: commit at the end of each phase, not several phases later.** Phase 5 (QA gate) arrived uncommitted again, same as Phase 3/4 did before. Worth a standing rule (e.g. in `.trae/rules`) rather than relying on review to catch it each time — standing rule established in `.agent/rules/phase-commit-discipline.md`, `.trae/rules/phase-commit-discipline.md`, and `GEMINI.md`; Phase 5 committed in `ce984ff`
-- [x] Optional one-time cleanup: now that `.gitignore` has been in place for two phases, consider `git rm -r --cached` on the already-tracked `__pycache__` files in one dedicated commit — done in dedicated commit `022b4b5`
+- [ ] **Recurring pattern to fix: commit at the end of each phase, not several phases later.** Phase 5 (QA gate) arrived uncommitted again, same as Phase 3/4 did before. Worth a standing rule (e.g. in `.trae/rules`) rather than relying on review to catch it each time
+- [ ] Optional one-time cleanup: now that `.gitignore` has been in place for two phases, consider `git rm -r --cached` on the already-tracked `__pycache__` files in one dedicated commit — low risk, and stops every future phase's diff from showing unrelated `.pyc` noise
 
 ## Phase 1 — Ingestion (SPEC §4.1)
 - [x] Implement Telegram listener (Telethon/Pyrogram session or Bot API webhook) watching the target channel
@@ -39,8 +39,7 @@ looked up rather than re-derived.
 - [x] Evaluate `quran-align` as a fallback — decided not to maintain it in v1, single operational path for now (reasonable call)
 - [x] Emit `align/{message_id}.json` per the SPEC §4.4 schema
 - [x] Compute an alignment coverage/confidence score
-- [ ] Unit tests: timestamps monotonic and within audio duration, against the regression set — parsing, monotonicity, and out-of-duration rejection tests verified passing in `test_alignment.py`; full live tool regression run remains pending real ctc-forced-aligner runtime + verified audio fixtures
-
+- [ ] Unit tests: timestamps monotonic and within audio duration, against the regression set — current tests inject a fake CLI runner, so parsing/validation logic is verified but the real tool has never been invoked. Specific thing to check on the first real run: the tool's own docs don't document an `--output_path`/output-location flag, so where exactly it writes its JSON sidecar is unconfirmed — the code assumes `<audio-stem>.json` next to the input WAV
 
 ## Phase 5 — QA gate (SPEC §4.5)
 - [x] Implement the combined threshold check (`match_confidence` + `alignment coverage`), thresholds config-driven
@@ -49,14 +48,16 @@ looked up rather than re-derived.
 - [x] Unit tests forcing pass and fail scenarios; verify correct branching and that fail never reaches publish — includes exact-boundary tests (0.9000 pass vs 0.8999 fail) and explicit end-to-end tests asserting render is never triggered on rejection
 
 ## Phase 6 — Render (SPEC §4.6)
-- [x] Build background asset pool loader (round-robin/random/keyed selection, config-driven)
+- [x] Build background asset pool loader (round-robin/random/keyed selection, config-driven) — all three strategies verified
 - [x] Implement the word-by-word text overlay renderer:
-  - [x] v1: generate `.ass` karaoke subtitles from the alignment JSON, burn in via ffmpeg
+  - [x] v1: generate `.ass` karaoke subtitles from the alignment JSON, burn in via ffmpeg — mechanically correct, real-render verified; karaoke highlight works but Primary/Secondary contrast is subtle enough to be barely visible, worth a deliberate pass
   - [ ] v2 candidate: Remotion composition consuming the same alignment JSON, if higher typographic fidelity is wanted later
-- [x] Apply the branding watermark overlay
-- [x] Output 1080×1920 H.264 MP4 to `render/{message_id}.mp4`; verify duration/format against target platform limits
-- [x] Integration test: render a sample end-to-end and visually spot-check output
-
+- [x] Apply the branding watermark overlay — code path correct (text handle + logo image, 5 position presets), but see asset-quality note below
+- [x] Output 1080×1920 H.264 MP4 to `render/{message_id}.mp4`; verify duration/format against target platform limits — confirmed via a real render in review (1080×1920, h264, audio present, duration matches recitation length)
+- [x] Integration test: render a sample end-to-end and visually spot-check output — automated real-ffmpeg test passes; an actual human visual spot-check (done in this review, see below) caught issues the automated test structurally can't
+- [x] **Fix: `SurahHeader` color renders wrong.** Resolved: corrected hex to BGR `&H0037AFD4` (Gold #D4AF37). Upgraded karaoke subtitles to timed dialogue events with inline color overrides (`\c`), eliminating Arabic RTL word order flipping caused by libass `\k` handling.
+- [x] **Fix: `BRANDING_FONT_PATH` is parsed but never used.** Resolved: wired `branding_font_path` through `RenderSettings` -> `RenderService` -> `KaraokeSubtitleGenerator`, added TTF font family extraction (`Amiri`), provided canonical font files, and passed `fontsdir=...` to FFmpeg `ass` filter.
+- [x] **Replace placeholder assets before this is actually publish-ready.** Resolved: replaced `001_default_plate.png` with high-resolution 1080x1920 illuminated Quranic background plate and `logo.png` with transparent 240x240 circular gold calligraphy seal. Reconciled procedural background fallback color across modules (`0x0b0e14`).
 
 ## Phase 7 — Publishing (SPEC §4.7)
 - [ ] Integrate the multi-platform posting API client

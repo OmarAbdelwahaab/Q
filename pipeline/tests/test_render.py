@@ -137,7 +137,7 @@ class TestKaraokeSubtitleGenerator(unittest.TestCase):
         self.assertEqual(ms_to_ass_time(1250), "0:00:01.25")
         self.assertEqual(ms_to_ass_time(65430), "0:01:05.43")
 
-    def test_generate_karaoke_tags_and_centiseconds(self) -> None:
+    def test_generate_bidi_karaoke_dialogue_events(self) -> None:
         generator = KaraokeSubtitleGenerator(font_name="Amiri", font_size=72)
         words = [
             {"word": "بِسْمِ", "start_ms": 100, "end_ms": 600},
@@ -149,9 +149,26 @@ class TestKaraokeSubtitleGenerator(unittest.TestCase):
         self.assertIn("PlayResY: 1920", ass_script)
         self.assertIn("Style: QuranText,Amiri,72", ass_script)
         self.assertIn("سورة الفاتحة • الآية 1", ass_script)
-        # Check karaoke tags {\k<cs>} (500ms = 50cs, 600ms = 60cs)
-        self.assertIn(r"{\k50}بِسْمِ", ass_script)
-        self.assertIn(r"{\k60}اللَّهِ", ass_script)
+        # Check BGR gold for SurahHeader (&H0037AFD4)
+        self.assertIn("&H0037AFD4", ass_script)
+        # Check Bidi color tags: active word in gold (&H0037AFD4), upcoming in dim (&H90707070), completed in white (&H00FFFFFF)
+        self.assertIn(r"{\c&H0037AFD4&}بِسْمِ {\c&H90707070&}اللَّهِ", ass_script)
+        self.assertIn(r"{\c&H00FFFFFF&}بِسْمِ {\c&H0037AFD4&}اللَّهِ", ass_script)
+
+    def test_get_font_family_name_from_ttf(self) -> None:
+        from pipeline.render.subtitles import get_font_family_name_from_ttf
+
+        # Existing Amiri font file
+        amiri_path = Path("pipeline/assets/fonts/Amiri-Regular.ttf")
+        if amiri_path.is_file():
+            name = get_font_family_name_from_ttf(amiri_path)
+            self.assertEqual(name, "Amiri")
+
+        # Non-existent file falls back to stem or default
+        self.assertEqual(
+            get_font_family_name_from_ttf(Path("nonexistent/CustomFont.ttf")),
+            "Traditional Arabic",
+        )
 
     def test_chunk_words_on_threshold_or_pause(self) -> None:
         generator = KaraokeSubtitleGenerator(words_per_line=2, pause_threshold_ms=400)
@@ -181,7 +198,7 @@ class TestKaraokeSubtitleGenerator(unittest.TestCase):
             self.assertTrue(output_file.is_file())
             content = output_file.read_text(encoding="utf-8")
             self.assertIn("Dialogue:", content)
-            self.assertIn(r"{\k50}الحمد", content)
+            self.assertIn(r"{\c&H0037AFD4&}الحمد", content)
 
 
 class TestFFmpegRenderer(unittest.TestCase):
@@ -217,6 +234,8 @@ class TestFFmpegRenderer(unittest.TestCase):
             runner = StubMediaRunner()
             renderer = FFmpegRenderer(runner=runner)
 
+            fonts_dir = dir_path / "fonts"
+            fonts_dir.mkdir()
             result = renderer.render(
                 audio_path=audio,
                 ass_path=ass,
@@ -225,6 +244,7 @@ class TestFFmpegRenderer(unittest.TestCase):
                 branding_handle="@testbrand",
                 branding_position="top_right",
                 max_duration_seconds=60.0,
+                fonts_dir=fonts_dir,
             )
 
             self.assertEqual(result, out)
@@ -238,8 +258,10 @@ class TestFFmpegRenderer(unittest.TestCase):
             self.assertIn("yuv420p", cmd_joined)
             self.assertIn("aac", cmd_joined)
             self.assertIn("subs.ass", cmd_joined)
+            self.assertIn("fontsdir=", cmd_joined)
             self.assertIn("@testbrand", cmd_joined)
             self.assertIn("-t 60.0", cmd_joined)
+
 
     def test_renderer_raises_on_resolution_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -405,16 +427,22 @@ class TestRenderRealFFmpegIntegration(unittest.TestCase):
             pool = BackgroundAssetPool(root / "backgrounds", strategy="round_robin")
             renderer = FFmpegRenderer()  # uses live ffmpeg and ffprobe
 
+            font_path = Path("pipeline/assets/fonts/arabic-display.ttf").resolve()
+            logo_path = Path("pipeline/assets/branding/logo.png").resolve()
+
             service = RenderService(
                 storage_root=root,
                 state_repository=state_repo,
                 alert_service=alerts,
                 background_pool=pool,
                 renderer=renderer,
+                branding_logo_path=logo_path if logo_path.is_file() else None,
+                branding_font_path=font_path if font_path.is_file() else None,
                 branding_handle="@QuranHub",
             )
 
             result = asyncio.run(service.render(message_id))
+
 
             # 6. Verify result and outputs
             self.assertEqual(result.status, "completed")

@@ -53,6 +53,53 @@ def ms_to_ass_time(ms: int) -> str:
     return f"{hours}:{minutes:02d}:{seconds:02d}.{cs:02d}"
 
 
+def get_font_family_name_from_ttf(font_path: Path) -> str:
+    """Extract font family name from TTF/OTF name table for libass font resolution."""
+    if not font_path.is_file():
+        return "Traditional Arabic"
+
+    try:
+        data = font_path.read_bytes()
+        if len(data) >= 12:
+            import struct
+
+            num_tables = struct.unpack(">H", data[4:6])[0]
+            for i in range(num_tables):
+                tag = data[12 + i * 16 : 16 + i * 16]
+                if tag == b"name":
+                    offset = struct.unpack(">I", data[20 + i * 16 : 24 + i * 16])[0]
+                    count = struct.unpack(">H", data[offset + 2 : offset + 4])[0]
+                    string_offset = (
+                        struct.unpack(">H", data[offset + 4 : offset + 6])[0] + offset
+                    )
+                    for j in range(count):
+                        rec = data[offset + 6 + j * 12 : offset + 18 + j * 12]
+                        (
+                            platform_id,
+                            encoding_id,
+                            language_id,
+                            name_id,
+                            length,
+                            str_off,
+                        ) = struct.unpack(">HHHHHH", rec)
+                        if name_id == 1:  # Font Family name
+                            raw = data[
+                                string_offset + str_off : string_offset + str_off + length
+                            ]
+                            try:
+                                decoded = raw.decode(
+                                    "utf-16be" if platform_id in (0, 3) else "utf-8"
+                                ).strip()
+                                if decoded:
+                                    return decoded
+                            except Exception:
+                                pass
+    except Exception:
+        pass
+
+    return font_path.stem
+
+
 class KaraokeSubtitleGenerator:
     """Generates Advanced SubStation Alpha (.ass) scripts with word-level karaoke timing."""
 
@@ -67,6 +114,31 @@ class KaraokeSubtitleGenerator:
         self.font_size = font_size
         self.words_per_line = max(1, words_per_line)
         self.pause_threshold_ms = pause_threshold_ms
+
+    # Color constants for ASS inline overrides (BGR format)
+    COLOR_ACTIVE = r"{\c&H0037AFD4&}"  # Gold (#D4AF37)
+    COLOR_COMPLETED = r"{\c&H00FFFFFF&}"  # Revealed white (#FFFFFF)
+    COLOR_UPCOMING = r"{\c&H90707070&}"  # Dim muted gray
+
+    def _format_bidi_line(
+        self,
+        line_words: list[AlignedWordItem],
+        active_idx: int | None = None,
+        last_completed_idx: int = -1,
+    ) -> str:
+        """Format continuous line text with word-level color tags preserving Arabic RTL layout."""
+        parts: list[str] = []
+        for j, item in enumerate(line_words):
+            if j == active_idx:
+                color = self.COLOR_ACTIVE
+            elif (active_idx is not None and j < active_idx) or (
+                active_idx is None and j <= last_completed_idx
+            ):
+                color = self.COLOR_COMPLETED
+            else:
+                color = self.COLOR_UPCOMING
+            parts.append(f"{color}{item.word}")
+        return " ".join(parts)
 
     def generate(
         self,
@@ -96,31 +168,56 @@ class KaraokeSubtitleGenerator:
             )
 
         # 2. Karaoke line dialogue events
-        for line_words in lines:
-            line_start_ms = line_words[0].start_ms
-            line_end_ms = line_words[-1].end_ms + 250  # 250ms hold tail after line ends
-
-            karaoke_text_parts: list[str] = []
-            previous_end_ms = line_start_ms
-
-            for word_item in line_words:
-                # Handle intra-word lead-in pause if any
-                gap_ms = word_item.start_ms - previous_end_ms
-                if gap_ms > 20:
-                    gap_cs = max(1, round(gap_ms / 10))
-                    karaoke_text_parts.append(f"{{\\k{gap_cs}}}")
-
-                duration_ms = word_item.end_ms - word_item.start_ms
-                duration_cs = max(1, round(duration_ms / 10))
-                karaoke_text_parts.append(f"{{\\k{duration_cs}}}{word_item.word} ")
-                previous_end_ms = word_item.end_ms
-
-            line_text = "".join(karaoke_text_parts).rstrip()
-            event_line = (
-                f"Dialogue: 0,{ms_to_ass_time(line_start_ms)},{ms_to_ass_time(line_end_ms)},"
-                f"QuranText,,0,0,0,,{line_text}"
+        # Note: We emit timed dialogue events with inline color overrides rather than ASS \\k tags.
+        # ASS \\k tags cause libass to split Arabic into separate LTR layout chunks (libass issue #406),
+        # reversing the word order. Continuous lines with \\c overrides preserve 100% native RTL shaping.
+        for line_idx, line_words in enumerate(lines):
+            next_line_start_ms = (
+                lines[line_idx + 1][0].start_ms if line_idx + 1 < len(lines) else None
             )
-            events.append(event_line)
+
+            prev_end_ms = line_words[0].start_ms
+            for idx, word_item in enumerate(line_words):
+                start_ms = max(word_item.start_ms, prev_end_ms)
+                end_ms = max(word_item.end_ms, start_ms)
+
+                if end_ms > start_ms:
+                    text = self._format_bidi_line(line_words, active_idx=idx)
+                    events.append(
+                        f"Dialogue: 0,{ms_to_ass_time(start_ms)},{ms_to_ass_time(end_ms)},"
+                        f"QuranText,,0,0,0,,{text}"
+                    )
+
+                # Inter-word pause interval (if any) before the next word in this line
+                if idx < len(line_words) - 1:
+                    next_word_start = max(end_ms, line_words[idx + 1].start_ms)
+                    if next_word_start > end_ms:
+                        text = self._format_bidi_line(
+                            line_words, active_idx=None, last_completed_idx=idx
+                        )
+                        events.append(
+                            f"Dialogue: 0,{ms_to_ass_time(end_ms)},{ms_to_ass_time(next_word_start)},"
+                            f"QuranText,,0,0,0,,{text}"
+                        )
+
+                prev_end_ms = end_ms
+
+            # Hold tail interval after the last word in the line
+            tail_start_ms = prev_end_ms
+            raw_tail_end_ms = tail_start_ms + 250  # 250ms hold tail
+            tail_end_ms = (
+                min(raw_tail_end_ms, next_line_start_ms)
+                if next_line_start_ms is not None
+                else raw_tail_end_ms
+            )
+            if tail_end_ms > tail_start_ms:
+                text = self._format_bidi_line(
+                    line_words, active_idx=None, last_completed_idx=len(line_words) - 1
+                )
+                events.append(
+                    f"Dialogue: 0,{ms_to_ass_time(tail_start_ms)},{ms_to_ass_time(tail_end_ms)},"
+                    f"QuranText,,0,0,0,,{text}"
+                )
 
         return self._build_script(events)
 
@@ -219,8 +316,8 @@ PlayResY: 1920
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: QuranText,{self.font_name},{self.font_size},&H00FFFFFF,&H50C0C0C0,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3,2,5,80,80,80,1
-Style: SurahHeader,{self.font_name},44,&H00D4AF37,&H00D4AF37,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,2,1,8,80,80,240,1
+Style: QuranText,{self.font_name},{self.font_size},&H00FFFFFF,&H90707070,&H00000000,&HA0000000,-1,0,0,0,100,100,0,0,1,3,2,5,80,80,80,1
+Style: SurahHeader,{self.font_name},44,&H0037AFD4,&H0037AFD4,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,2,1,8,80,80,240,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -229,3 +326,4 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     def _build_empty_script(self) -> str:
         return self._build_script([])
+

@@ -10,7 +10,10 @@ from typing import Protocol
 from pipeline.logging import get_logger
 from pipeline.render.background import BackgroundAssetPool
 from pipeline.render.ffmpeg import FFmpegRenderer, RenderError
-from pipeline.render.subtitles import KaraokeSubtitleGenerator
+from pipeline.render.subtitles import (
+    KaraokeSubtitleGenerator,
+    get_font_family_name_from_ttf,
+)
 
 
 class StateRepository(Protocol):
@@ -47,6 +50,7 @@ class RenderService:
         renderer: FFmpegRenderer | None = None,
         branding_logo_path: Path | None = None,
         branding_handle: str | None = None,
+        branding_font_path: Path | None = None,
         branding_position: str = "top_right",
         max_duration_seconds: float | None = None,
     ) -> None:
@@ -54,13 +58,23 @@ class RenderService:
         self.state_repository = state_repository
         self.alert_service = alert_service
         self.background_pool = background_pool
-        self.subtitle_generator = subtitle_generator or KaraokeSubtitleGenerator()
+        self.branding_font_path = branding_font_path
+
+        if subtitle_generator is not None:
+            self.subtitle_generator = subtitle_generator
+        else:
+            font_name = "Traditional Arabic"
+            if branding_font_path and branding_font_path.is_file():
+                font_name = get_font_family_name_from_ttf(branding_font_path)
+            self.subtitle_generator = KaraokeSubtitleGenerator(font_name=font_name)
+
         self.renderer = renderer or FFmpegRenderer()
         self.branding_logo_path = branding_logo_path
         self.branding_handle = branding_handle
         self.branding_position = branding_position
         self.max_duration_seconds = max_duration_seconds
         self.logger = get_logger(__name__, service="render")
+
 
     async def trigger_render(self, message_id: int) -> None:
         """RenderTrigger protocol compliance for integration with QAGateService."""
@@ -146,6 +160,11 @@ class RenderService:
 
         # 5. Execute FFmpeg rendering
         target_output = output_path or render_dir / f"{message_id}.mp4"
+        fonts_dir = (
+            self.branding_font_path.parent
+            if (self.branding_font_path and self.branding_font_path.is_file())
+            else None
+        )
         try:
             rendered_file = self.renderer.render(
                 audio_path=resolved_audio,
@@ -156,8 +175,10 @@ class RenderService:
                 branding_handle=self.branding_handle,
                 branding_position=self.branding_position,
                 max_duration_seconds=self.max_duration_seconds,
+                fonts_dir=fonts_dir,
             )
             probe = self.renderer.probe_media(rendered_file)
+
         except RenderError as exc:
             error = f"Rendering error: {exc}"
             return await self._fail_stage(message_id, error)

@@ -38,7 +38,13 @@ async def main(argv: list[str] | None = None) -> int:
         asset_dir=settings.background_asset_path,
         strategy=settings.background_selection_strategy,
     )
-    subtitle_generator = KaraokeSubtitleGenerator()
+    font_name = "Traditional Arabic"
+    if settings.branding_font_path and settings.branding_font_path.is_file():
+        from pipeline.render.subtitles import get_font_family_name_from_ttf
+
+        font_name = get_font_family_name_from_ttf(settings.branding_font_path)
+
+    subtitle_generator = KaraokeSubtitleGenerator(font_name=font_name)
     renderer = FFmpegRenderer(
         ffmpeg_binary=settings.ffmpeg_binary,
         ffprobe_binary=settings.ffprobe_binary,
@@ -53,9 +59,11 @@ async def main(argv: list[str] | None = None) -> int:
         renderer=renderer,
         branding_logo_path=settings.branding_logo_path,
         branding_handle=settings.branding_handle,
+        branding_font_path=settings.branding_font_path,
         branding_position=settings.branding_position,
         max_duration_seconds=settings.max_duration_seconds,
     )
+
 
     result = await service.render(args.message_id)
     if result.status == "completed":
