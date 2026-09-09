@@ -18,6 +18,20 @@ class AlertService(Protocol):
     async def send_audio_extraction_failure(self, message: str) -> None:
         """Send an alert for an audio extraction failure."""
 
+    async def send_recognition_failure(self, message: str) -> None:
+        """Send an alert for a verse recognition failure."""
+
+    async def send_alignment_failure(self, message: str) -> None:
+        """Send an alert for an alignment failure."""
+
+    async def send_qa_gate_hold(
+        self, message: str, payload: dict[str, object] | None = None
+    ) -> None:
+        """Send an alert when an item fails the QA gate and is held in the review queue."""
+
+    async def send_qa_gate_failure(self, message: str) -> None:
+        """Send an alert for an operational failure during QA gate evaluation."""
+
 
 class CompositeAlertService:
     """Dispatch alerts to any configured channels and always log them."""
@@ -45,11 +59,24 @@ class CompositeAlertService:
     async def send_alignment_failure(self, message: str) -> None:
         self._dispatch("alignment_failure", message)
 
-    def _dispatch(self, event: str, message: str) -> None:
+    async def send_qa_gate_hold(
+        self, message: str, payload: dict[str, object] | None = None
+    ) -> None:
+        self._dispatch("qa_gate_hold", message, extra_payload=payload)
+
+    async def send_qa_gate_failure(self, message: str) -> None:
+        self._dispatch("qa_gate_failure", message)
+
+    def _dispatch(
+        self, event: str, message: str, extra_payload: dict[str, object] | None = None
+    ) -> None:
         self.logger.error("Pipeline failure alert triggered", extra={"event": event, "alert_message": message})
 
         if self.webhook_url:
-            self._post_json(self.webhook_url, {"text": message, "event": event})
+            data: dict[str, object] = {"text": message, "event": event}
+            if extra_payload:
+                data.update(extra_payload)
+            self._post_json(self.webhook_url, data)
 
         if self.telegram_bot_token and self.telegram_chat_id:
             encoded_message = urllib.parse.urlencode(

@@ -21,6 +21,13 @@ def _read_int(name: str, default: int | None = None) -> int | None:
     return int(value)
 
 
+def _read_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return default
+    return float(value)
+
+
 @dataclass(slots=True)
 class IngestionSettings:
     telegram_api_id: int | None
@@ -175,6 +182,43 @@ class AlignmentSettings:
             alignment_batch_size=batch_size,
             alert_webhook_url=os.getenv("ALERT_WEBHOOK_URL") or None,
             alert_telegram_bot_token=os.getenv("ALERT_TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or None,
+            alert_telegram_chat_id=os.getenv("ALERT_TELEGRAM_CHAT_ID") or None,
+            log_level=os.getenv("LOG_LEVEL", "INFO"),
+        )
+
+
+@dataclass(slots=True)
+class QAGateSettings:
+    state_db_path: Path
+    storage_root: Path
+    match_confidence_threshold: float
+    alignment_coverage_threshold: float
+    alert_webhook_url: str | None
+    alert_telegram_bot_token: str | None
+    alert_telegram_chat_id: str | None
+    log_level: str
+
+    @classmethod
+    def from_env(cls) -> "QAGateSettings":
+        project_root = Path(os.getenv("PIPELINE_PROJECT_ROOT", Path.cwd()))
+        storage_root = Path(os.getenv("PIPELINE_STORAGE_ROOT", project_root)).resolve()
+        match_thresh = _read_float("QA_MATCH_CONFIDENCE_THRESHOLD", 0.90)
+        align_thresh = _read_float("QA_ALIGNMENT_COVERAGE_THRESHOLD", 0.95)
+        if not (0.0 <= match_thresh <= 1.0):
+            raise ValueError("QA_MATCH_CONFIDENCE_THRESHOLD must be between 0.0 and 1.0.")
+        if not (0.0 <= align_thresh <= 1.0):
+            raise ValueError("QA_ALIGNMENT_COVERAGE_THRESHOLD must be between 0.0 and 1.0.")
+        return cls(
+            state_db_path=Path(
+                os.getenv("STATE_DB_PATH", str(project_root / "pipeline" / "state" / "pipeline.db"))
+            ).resolve(),
+            storage_root=storage_root,
+            match_confidence_threshold=match_thresh,
+            alignment_coverage_threshold=align_thresh,
+            alert_webhook_url=os.getenv("ALERT_WEBHOOK_URL") or None,
+            alert_telegram_bot_token=os.getenv("ALERT_TELEGRAM_BOT_TOKEN")
+            or os.getenv("TELEGRAM_BOT_TOKEN")
+            or None,
             alert_telegram_chat_id=os.getenv("ALERT_TELEGRAM_CHAT_ID") or None,
             log_level=os.getenv("LOG_LEVEL", "INFO"),
         )
