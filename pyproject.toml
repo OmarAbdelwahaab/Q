@@ -19,3 +19,6 @@ dev = [
 
 [tool.setuptools.packages.find]
 include = ["pipeline*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

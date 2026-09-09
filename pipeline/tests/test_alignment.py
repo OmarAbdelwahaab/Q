@@ -55,6 +55,17 @@ class AlignmentTests(unittest.TestCase):
                 return CompletedProcess(command, 0, "", "")
             with self.assertRaises(AlignmentError): CtcForcedAligner(runner=runner).align(audio, "بسم الله")
 
+    def test_ctc_adapter_rejects_out_of_duration_timestamps(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            audio = Path(directory) / "audio.wav"; write_wav(audio, seconds=2)
+            def runner(command):
+                Path(command[2]).with_suffix(".json").write_text(json.dumps([{"start": 0.5, "end": 1.0}, {"start": 1.0, "end": 2.5}]), encoding="utf-8")
+                from subprocess import CompletedProcess
+                return CompletedProcess(command, 0, "", "")
+            with self.assertRaisesRegex(AlignmentError, "out-of-duration"):
+                CtcForcedAligner(runner=runner).align(audio, "بسم الله")
+
+
     def test_ctc_adapter_names_checked_locations_when_output_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             audio = Path(directory) / "audio.wav"; write_wav(audio)

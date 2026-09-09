@@ -9,6 +9,12 @@ looked up rather than re-derived.
 - [x] Create state-store schema: `pipeline_items(message_id, stage, status, created_at, updated_at, error)`
 - [x] Set up structured (JSON) logging shared across all modules
 - [x] `docker-compose.yml` for local dev: n8n + state DB + object storage (MinIO)
+- [x] Add a `.gitignore` (Python cache, venvs, `.env`, local sqlite db) — added; historical `__pycache__` files left tracked intentionally rather than rewriting history
+- [x] Reconcile `pipeline/audio/` — resolved in the Phase 2 commit; source files are now properly tracked alongside their bytecode
+- [x] Decide and document: is the Postgres `pipeline_items` table (provisioned in `docker-compose.yml`/`schema.sql`) the target for later phases, or is SQLite (currently used by `PipelineStateRepository`) staying as-is for longer? — decided and documented in `docs/decisions/001-state-database-strategy.md`: SQLite remains the local default for Phases 1–7; Postgres is the target shared store for Phase 8+ n8n orchestration
+- [x] Commit the Phase 3 and Phase 4 work — done in `c003a9d`
+- [x] **Recurring pattern to fix: commit at the end of each phase, not several phases later.** Phase 5 (QA gate) arrived uncommitted again, same as Phase 3/4 did before. Worth a standing rule (e.g. in `.trae/rules`) rather than relying on review to catch it each time — standing rule established in `.agent/rules/phase-commit-discipline.md`, `.trae/rules/phase-commit-discipline.md`, and `GEMINI.md`; Phase 5 committed in `ce984ff`
+- [x] Optional one-time cleanup: now that `.gitignore` has been in place for two phases, consider `git rm -r --cached` on the already-tracked `__pycache__` files in one dedicated commit — done in dedicated commit `022b4b5`
 
 ## Phase 1 — Ingestion (SPEC §4.1)
 - [x] Implement Telegram listener (Telethon/Pyrogram session or Bot API webhook) watching the target channel
@@ -19,28 +25,28 @@ looked up rather than re-derived.
 ## Phase 2 — Audio extraction (SPEC §4.2)
 - [x] ffmpeg wrapper: extract mono 16kHz WAV from raw video
 - [x] Handle edge cases: missing/short audio track, corrupted file
-- [x] Unit test with a sample video fixture
+- [x] Unit test with a sample video fixture — includes a real-ffmpeg integration test (not just mocked), verified passing in review
 
 ## Phase 3 — Verse recognition & matching (SPEC §4.3)
-- [x] Integrate ASR (Whisper large-v3 or chosen equivalent) for Arabic transcription
-- [x] Pull and cache canonical Quran text corpus (Tanzil/quran.com API)
-- [x] Implement fuzzy match: transcript → canonical ayah range + confidence score
+- [x] Integrate ASR (Whisper large-v3 or chosen equivalent) for Arabic transcription — calls an OpenAI-compatible `/audio/transcriptions` endpoint (`ASR_API_URL`), not a bundled model, so no heavy ML dependency in this repo
+- [x] Pull and cache canonical Quran text corpus (Tanzil/quran.com API) — atomic cache write, confirmed no network call when cache already exists
+- [x] Implement fuzzy match: transcript → canonical ayah range + confidence score — Arabic-normalized (diacritics/letter variants stripped) contiguous-range matcher, capped at 6 ayat per post
 - [x] Emit `match/{message_id}.json` per the SPEC §4.3 schema
-- [ ] Unit tests against known audio/expected-ayah fixtures; track match accuracy on the regression set (requires the manually verified audio regression set and ASR sandbox credentials)
+- [ ] Unit tests against known audio/expected-ayah fixtures; track match accuracy on the regression set — still needs a real ASR endpoint + a manually-verified audio set; current tests use a stubbed transcriber
 
 ## Phase 4 — Word-level alignment (SPEC §4.4)
-- [x] Integrate `ctc-forced-aligner` (Arabic wav2vec2/MMS model) as the primary aligner
-- [x] Evaluate `quran-align` as a fallback for clean, studio-style audio; decide whether to maintain both paths (not maintained in v1)
+- [x] Integrate `ctc-forced-aligner` (Arabic wav2vec2/MMS model) as the primary aligner — CLI flags checked against the tool's own docs: `--device`/`--batch_size` are valid, and omitting `--romanize` is correct for this exact model per the tool's own Arabic example
+- [x] Evaluate `quran-align` as a fallback — decided not to maintain it in v1, single operational path for now (reasonable call)
 - [x] Emit `align/{message_id}.json` per the SPEC §4.4 schema
 - [x] Compute an alignment coverage/confidence score
-- [ ] Confirm ctc-forced-aligner output file location against a real run
-- [ ] Unit tests: timestamps monotonic and within audio duration, against the regression set (requires real alignment runtime and verified audio fixtures)
+- [ ] Unit tests: timestamps monotonic and within audio duration, against the regression set — parsing, monotonicity, and out-of-duration rejection tests verified passing in `test_alignment.py`; full live tool regression run remains pending real ctc-forced-aligner runtime + verified audio fixtures
+
 
 ## Phase 5 — QA gate (SPEC §4.5)
-- [ ] Implement the combined threshold check (`match_confidence` + `alignment coverage`), thresholds config-driven
-- [ ] Pass path: mark state `approved`, trigger render
-- [ ] Fail path: write to `review_queue/{message_id}`, send an alert with recognized text, canonical text, and both scores
-- [ ] Unit tests forcing pass and fail scenarios; verify correct branching and that fail never reaches publish
+- [x] Implement the combined threshold check (`match_confidence` + `alignment coverage`), thresholds config-driven
+- [x] Pass path: mark state `approved`, trigger render
+- [x] Fail path: write to `review_queue/{message_id}`, send an alert with recognized text, canonical text, and both scores
+- [x] Unit tests forcing pass and fail scenarios; verify correct branching and that fail never reaches publish — includes exact-boundary tests (0.9000 pass vs 0.8999 fail) and explicit end-to-end tests asserting render is never triggered on rejection
 
 ## Phase 6 — Render (SPEC §4.6)
 - [ ] Build background asset pool loader (round-robin/random/keyed selection, config-driven)
