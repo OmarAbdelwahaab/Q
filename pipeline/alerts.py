@@ -32,6 +32,9 @@ class AlertService(Protocol):
     async def send_qa_gate_failure(self, message: str) -> None:
         """Send an alert for an operational failure during QA gate evaluation."""
 
+    async def send_render_failure(self, message: str) -> None:
+        """Send an alert for a rendering failure."""
+
 
 class CompositeAlertService:
     """Dispatch alerts to any configured channels and always log them."""
@@ -66,6 +69,10 @@ class CompositeAlertService:
 
     async def send_qa_gate_failure(self, message: str) -> None:
         self._dispatch("qa_gate_failure", message)
+
+    async def send_render_failure(self, message: str) -> None:
+        self._dispatch("render_failure", message)
+
 
     def _dispatch(
         self, event: str, message: str, extra_payload: dict[str, object] | None = None

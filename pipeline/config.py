@@ -222,3 +222,61 @@ class QAGateSettings:
             alert_telegram_chat_id=os.getenv("ALERT_TELEGRAM_CHAT_ID") or None,
             log_level=os.getenv("LOG_LEVEL", "INFO"),
         )
+
+
+@dataclass(slots=True)
+class RenderSettings:
+    state_db_path: Path
+    storage_root: Path
+    background_asset_path: Path
+    background_selection_strategy: str
+    branding_logo_path: Path | None
+    branding_handle: str | None
+    branding_font_path: Path | None
+    branding_position: str
+    max_duration_seconds: float | None
+    ffmpeg_binary: str
+    ffprobe_binary: str
+    alert_webhook_url: str | None
+    alert_telegram_bot_token: str | None
+    alert_telegram_chat_id: str | None
+    log_level: str
+
+    @classmethod
+    def from_env(cls) -> "RenderSettings":
+        project_root = Path(os.getenv("PIPELINE_PROJECT_ROOT", Path.cwd()))
+        storage_root = Path(os.getenv("PIPELINE_STORAGE_ROOT", project_root)).resolve()
+        strategy = os.getenv("BACKGROUND_SELECTION_STRATEGY", "round_robin").lower()
+        if strategy not in {"round_robin", "random", "keyed"}:
+            raise ValueError(f"Invalid BACKGROUND_SELECTION_STRATEGY: {strategy}")
+
+        max_dur_str = os.getenv("RENDER_MAX_DURATION_SECONDS")
+        max_duration = float(max_dur_str) if max_dur_str else None
+
+        logo_path = os.getenv("BRANDING_LOGO_PATH")
+        font_path = os.getenv("BRANDING_FONT_PATH")
+
+        return cls(
+            state_db_path=Path(
+                os.getenv("STATE_DB_PATH", str(project_root / "pipeline" / "state" / "pipeline.db"))
+            ).resolve(),
+            storage_root=storage_root,
+            background_asset_path=Path(
+                os.getenv("BACKGROUND_ASSET_PATH", str(project_root / "pipeline" / "assets" / "backgrounds"))
+            ).resolve(),
+            background_selection_strategy=strategy,
+            branding_logo_path=Path(logo_path).resolve() if logo_path else None,
+            branding_handle=os.getenv("BRANDING_HANDLE") or None,
+            branding_font_path=Path(font_path).resolve() if font_path else None,
+            branding_position=os.getenv("BRANDING_POSITION", "top_right"),
+            max_duration_seconds=max_duration,
+            ffmpeg_binary=os.getenv("FFMPEG_BINARY", "ffmpeg"),
+            ffprobe_binary=os.getenv("FFPROBE_BINARY", "ffprobe"),
+            alert_webhook_url=os.getenv("ALERT_WEBHOOK_URL") or None,
+            alert_telegram_bot_token=os.getenv("ALERT_TELEGRAM_BOT_TOKEN")
+            or os.getenv("TELEGRAM_BOT_TOKEN")
+            or None,
+            alert_telegram_chat_id=os.getenv("ALERT_TELEGRAM_CHAT_ID") or None,
+            log_level=os.getenv("LOG_LEVEL", "INFO"),
+        )
+

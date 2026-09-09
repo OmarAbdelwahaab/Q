@@ -49,13 +49,14 @@ looked up rather than re-derived.
 - [x] Unit tests forcing pass and fail scenarios; verify correct branching and that fail never reaches publish — includes exact-boundary tests (0.9000 pass vs 0.8999 fail) and explicit end-to-end tests asserting render is never triggered on rejection
 
 ## Phase 6 — Render (SPEC §4.6)
-- [ ] Build background asset pool loader (round-robin/random/keyed selection, config-driven)
-- [ ] Implement the word-by-word text overlay renderer:
-  - [ ] v1: generate `.ass` karaoke subtitles from the alignment JSON, burn in via ffmpeg
+- [x] Build background asset pool loader (round-robin/random/keyed selection, config-driven)
+- [x] Implement the word-by-word text overlay renderer:
+  - [x] v1: generate `.ass` karaoke subtitles from the alignment JSON, burn in via ffmpeg
   - [ ] v2 candidate: Remotion composition consuming the same alignment JSON, if higher typographic fidelity is wanted later
-- [ ] Apply the branding watermark overlay
-- [ ] Output 1080×1920 H.264 MP4 to `render/{message_id}.mp4`; verify duration/format against target platform limits
-- [ ] Integration test: render a sample end-to-end and visually spot-check output
+- [x] Apply the branding watermark overlay
+- [x] Output 1080×1920 H.264 MP4 to `render/{message_id}.mp4`; verify duration/format against target platform limits
+- [x] Integration test: render a sample end-to-end and visually spot-check output
+
 
 ## Phase 7 — Publishing (SPEC §4.7)
 - [ ] Integrate the multi-platform posting API client
