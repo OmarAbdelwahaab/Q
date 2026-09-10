@@ -109,36 +109,134 @@ class KaraokeSubtitleGenerator:
         font_size: int = 70,
         words_per_line: int = 6,
         pause_threshold_ms: int = 500,
+        font_path: Path | None = None,
+        center_y: int = 960,
+        play_res_x: int = 1080,
+        play_res_y: int = 1920,
     ) -> None:
         self.font_name = font_name
         self.font_size = font_size
         self.words_per_line = max(1, words_per_line)
         self.pause_threshold_ms = pause_threshold_ms
+        self.font_path = font_path
+        self.center_y = center_y
+        self.play_res_x = play_res_x
+        self.play_res_y = play_res_y
 
-    # Color constants for ASS inline overrides (BGR format)
-    COLOR_ACTIVE = r"{\c&H0037AFD4&}"  # Gold (#D4AF37)
-    COLOR_COMPLETED = r"{\c&H00FFFFFF&}"  # Revealed white (#FFFFFF)
-    COLOR_UPCOMING = r"{\c&H90707070&}"  # Dim muted gray
-
-    def _format_bidi_line(
+    def _compute_word_clips(
         self,
+        line_text: str,
         line_words: list[AlignedWordItem],
-        active_idx: int | None = None,
-        last_completed_idx: int = -1,
-    ) -> str:
-        """Format continuous line text with word-level color tags preserving Arabic RTL layout."""
-        parts: list[str] = []
-        for j, item in enumerate(line_words):
-            if j == active_idx:
-                color = self.COLOR_ACTIVE
-            elif (active_idx is not None and j < active_idx) or (
-                active_idx is None and j <= last_completed_idx
-            ):
-                color = self.COLOR_COMPLETED
-            else:
-                color = self.COLOR_UPCOMING
-            parts.append(f"{color}{item.word}")
-        return " ".join(parts)
+    ) -> list[tuple[int, int]]:
+        """Compute pixel clip intervals [x1, x2] for each word in line_text.
+
+        Uses OpenType text shaping via uharfbuzz when available to determine exact
+        glyph advances and visual bounding boxes. Because Arabic is Right-to-Left,
+        word N-1 is on the far visual left and word 0 is on the far visual right.
+        Midpoints in inter-word spaces are used as clip boundaries so clipping
+        never bisects a character.
+        """
+        words = [w.word for w in line_words]
+        num_words = len(words)
+        if num_words == 0:
+            return []
+
+        resolved_font_path = self.font_path
+        if resolved_font_path is None or not resolved_font_path.is_file():
+            for candidate in [
+                Path("pipeline/assets/fonts/Amiri-Regular.ttf"),
+                Path("pipeline/assets/fonts/arabic-display.ttf"),
+            ]:
+                if candidate.is_file():
+                    resolved_font_path = candidate
+                    break
+
+        if resolved_font_path and resolved_font_path.is_file():
+            try:
+                import uharfbuzz as hb
+
+                blob = hb.Blob.from_file_path(str(resolved_font_path))
+                face = hb.Face(blob)
+                font = hb.Font(face)
+                upem = face.upem
+
+                buf = hb.Buffer()
+                buf.add_str(line_text)
+                buf.guess_segment_properties()
+                hb.shape(font, buf)
+
+                word_char_ranges: list[tuple[int, int]] = []
+                idx = 0
+                for w in words:
+                    word_char_ranges.append((idx, idx + len(w)))
+                    idx += len(w) + 1
+
+                word_x_bounds = {
+                    i: [float("inf"), float("-inf")] for i in range(num_words)
+                }
+                curr_x = 0
+                for info, pos in zip(buf.glyph_infos, buf.glyph_positions):
+                    gx1 = curr_x
+                    gx2 = curr_x + pos.x_advance
+                    c = info.cluster
+                    for i, (w_start, w_end) in enumerate(word_char_ranges):
+                        if w_start <= c < w_end:
+                            word_x_bounds[i][0] = min(word_x_bounds[i][0], gx1)
+                            word_x_bounds[i][1] = max(word_x_bounds[i][1], gx2)
+                            break
+                    curr_x += pos.x_advance
+
+                total_w = curr_x
+                if total_w > 0:
+                    line_render_w = total_w * (self.font_size / upem) * 0.36
+                    line_x1 = (self.play_res_x - line_render_w) / 2.0
+
+                    visual_order = sorted(
+                        range(num_words), key=lambda i: word_x_bounds[i][0]
+                    )
+                    visual_cutoffs = [0.0]
+                    for idx_v in range(len(visual_order) - 1):
+                        w_left = visual_order[idx_v]
+                        w_right = visual_order[idx_v + 1]
+                        mid = (
+                            word_x_bounds[w_left][1] + word_x_bounds[w_right][0]
+                        ) / 2.0
+                        visual_cutoffs.append(mid / total_w)
+                    visual_cutoffs.append(1.0)
+
+                    clips: list[tuple[int, int]] = [(0, 0)] * num_words
+                    for idx_v, w_idx in enumerate(visual_order):
+                        f1 = visual_cutoffs[idx_v]
+                        f2 = visual_cutoffs[idx_v + 1]
+                        sx1 = int(round(line_x1 + f1 * line_render_w))
+                        sx2 = int(round(line_x1 + f2 * line_render_w))
+                        if idx_v == 0:
+                            sx1 = max(0, sx1 - 40)
+                        if idx_v == len(visual_order) - 1:
+                            sx2 = min(self.play_res_x, sx2 + 40)
+                        clips[w_idx] = (sx1, sx2)
+                    return clips
+            except Exception:
+                pass
+
+        # Proportional fallback based on character count if font parsing fails
+        char_counts = [max(1, len(w)) for w in words]
+        total_chars = sum(char_counts)
+        est_w = min(self.play_res_x - 160, int(total_chars * self.font_size * 0.36))
+        line_x1 = (self.play_res_x - est_w) / 2.0
+        clips = [(0, 0)] * num_words
+        curr_frac = 0.0
+        for idx_v, w_idx in enumerate(reversed(range(num_words))):
+            frac = char_counts[w_idx] / total_chars
+            sx1 = int(round(line_x1 + curr_frac * est_w))
+            sx2 = int(round(line_x1 + (curr_frac + frac) * est_w))
+            if idx_v == 0:
+                sx1 = max(0, sx1 - 40)
+            if idx_v == num_words - 1:
+                sx2 = min(self.play_res_x, sx2 + 40)
+            clips[w_idx] = (sx1, sx2)
+            curr_frac += frac
+        return clips
 
     def generate(
         self,
@@ -167,57 +265,54 @@ class KaraokeSubtitleGenerator:
                 f"Dialogue: 1,{start_time},{end_time},SurahHeader,,0,0,0,,{header_text}"
             )
 
-        # 2. Karaoke line dialogue events
-        # Note: We emit timed dialogue events with inline color overrides rather than ASS \\k tags.
-        # ASS \\k tags cause libass to split Arabic into separate LTR layout chunks (libass issue #406),
-        # reversing the word order. Continuous lines with \\c overrides preserve 100% native RTL shaping.
+        # 2. Karaoke line dialogue events using non-interleaved clip architecture.
+        # Standard ASS \\k tags or inline per-word \\c overrides cause libass to split Arabic into
+        # separate LTR layout chunks, flipping word order. By rendering the entire continuous Arabic
+        # sentence unbroken and applying rectangular \\clip bounds for word highlight reveals,
+        # HarfBuzz shapes 100% native Right-to-Left Arabic text without any word transposition.
         for line_idx, line_words in enumerate(lines):
             next_line_start_ms = (
                 lines[line_idx + 1][0].start_ms if line_idx + 1 < len(lines) else None
             )
+            line_start_ms = line_words[0].start_ms
+            raw_line_end_ms = line_words[-1].end_ms + 250
+            line_end_ms = (
+                min(raw_line_end_ms, next_line_start_ms)
+                if next_line_start_ms is not None
+                else raw_line_end_ms
+            )
 
-            prev_end_ms = line_words[0].start_ms
+            line_text = " ".join(item.word for item in line_words)
+            clips = self._compute_word_clips(line_text, line_words)
+            pos_tag = f"{{\\an5\\pos({self.play_res_x // 2},{self.center_y})}}"
+
+            # Base Layer 0: Whole line in Dim Gray for entire line duration
+            events.append(
+                f"Dialogue: 0,{ms_to_ass_time(line_start_ms)},{ms_to_ass_time(line_end_ms)},"
+                f"QuranDim,,0,0,0,,{pos_tag}{line_text}"
+            )
+
+            # Layers 1 & 2: Word-by-word active (Gold) and completed (White) reveal clips
             for idx, word_item in enumerate(line_words):
-                start_ms = max(word_item.start_ms, prev_end_ms)
-                end_ms = max(word_item.end_ms, start_ms)
+                c1, c2 = clips[idx]
+                clip_tag = (
+                    f"{{\\an5\\pos({self.play_res_x // 2},{self.center_y})"
+                    f"\\clip({c1},0,{c2},{self.play_res_y})}}"
+                )
 
-                if end_ms > start_ms:
-                    text = self._format_bidi_line(line_words, active_idx=idx)
+                if word_item.end_ms > word_item.start_ms:
+                    # Layer 2: Active Gold highlight while word is spoken
                     events.append(
-                        f"Dialogue: 0,{ms_to_ass_time(start_ms)},{ms_to_ass_time(end_ms)},"
-                        f"QuranText,,0,0,0,,{text}"
+                        f"Dialogue: 2,{ms_to_ass_time(word_item.start_ms)},{ms_to_ass_time(word_item.end_ms)},"
+                        f"QuranActive,,0,0,0,,{clip_tag}{line_text}"
                     )
 
-                # Inter-word pause interval (if any) before the next word in this line
-                if idx < len(line_words) - 1:
-                    next_word_start = max(end_ms, line_words[idx + 1].start_ms)
-                    if next_word_start > end_ms:
-                        text = self._format_bidi_line(
-                            line_words, active_idx=None, last_completed_idx=idx
-                        )
-                        events.append(
-                            f"Dialogue: 0,{ms_to_ass_time(end_ms)},{ms_to_ass_time(next_word_start)},"
-                            f"QuranText,,0,0,0,,{text}"
-                        )
-
-                prev_end_ms = end_ms
-
-            # Hold tail interval after the last word in the line
-            tail_start_ms = prev_end_ms
-            raw_tail_end_ms = tail_start_ms + 250  # 250ms hold tail
-            tail_end_ms = (
-                min(raw_tail_end_ms, next_line_start_ms)
-                if next_line_start_ms is not None
-                else raw_tail_end_ms
-            )
-            if tail_end_ms > tail_start_ms:
-                text = self._format_bidi_line(
-                    line_words, active_idx=None, last_completed_idx=len(line_words) - 1
-                )
-                events.append(
-                    f"Dialogue: 0,{ms_to_ass_time(tail_start_ms)},{ms_to_ass_time(tail_end_ms)},"
-                    f"QuranText,,0,0,0,,{text}"
-                )
+                if line_end_ms > word_item.end_ms:
+                    # Layer 1: Completed White reveal once word finishes
+                    events.append(
+                        f"Dialogue: 1,{ms_to_ass_time(word_item.end_ms)},{ms_to_ass_time(line_end_ms)},"
+                        f"QuranCompleted,,0,0,0,,{clip_tag}{line_text}"
+                    )
 
         return self._build_script(events)
 
@@ -311,12 +406,15 @@ ScriptType: v4.00+
 WrapStyle: 0
 ScaledBorderAndShadow: yes
 YCbCr Matrix: TV.601
-PlayResX: 1080
-PlayResY: 1920
+PlayResX: {self.play_res_x}
+PlayResY: {self.play_res_y}
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: QuranText,{self.font_name},{self.font_size},&H00FFFFFF,&H90707070,&H00000000,&HA0000000,-1,0,0,0,100,100,0,0,1,3,2,5,80,80,80,1
+Style: QuranDim,{self.font_name},{self.font_size},&H90707070,&H90707070,&H00000000,&HA0000000,-1,0,0,0,100,100,0,0,1,3,2,5,80,80,80,1
+Style: QuranActive,{self.font_name},{self.font_size},&H0037AFD4,&H0037AFD4,&H00000000,&HA0000000,-1,0,0,0,100,100,0,0,1,3,2,5,80,80,80,1
+Style: QuranCompleted,{self.font_name},{self.font_size},&H00FFFFFF,&H00FFFFFF,&H00000000,&HA0000000,-1,0,0,0,100,100,0,0,1,3,2,5,80,80,80,1
 Style: SurahHeader,{self.font_name},44,&H0037AFD4,&H0037AFD4,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,2,1,8,80,80,240,1
 
 [Events]

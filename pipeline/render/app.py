@@ -44,7 +44,9 @@ async def main(argv: list[str] | None = None) -> int:
 
         font_name = get_font_family_name_from_ttf(settings.branding_font_path)
 
-    subtitle_generator = KaraokeSubtitleGenerator(font_name=font_name)
+    subtitle_generator = KaraokeSubtitleGenerator(
+        font_name=font_name, font_path=settings.branding_font_path
+    )
     renderer = FFmpegRenderer(
         ffmpeg_binary=settings.ffmpeg_binary,
         ffprobe_binary=settings.ffprobe_binary,

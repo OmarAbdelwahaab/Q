@@ -49,15 +49,16 @@ looked up rather than re-derived.
 
 ## Phase 6 — Render (SPEC §4.6)
 - [x] Build background asset pool loader (round-robin/random/keyed selection, config-driven) — all three strategies verified
-- [x] Implement the word-by-word text overlay renderer:
-  - [x] v1: generate `.ass` karaoke subtitles from the alignment JSON, burn in via ffmpeg — mechanically correct, real-render verified; karaoke highlight works but Primary/Secondary contrast is subtle enough to be barely visible, worth a deliberate pass
-  - [ ] v2 candidate: Remotion composition consuming the same alignment JSON, if higher typographic fidelity is wanted later
-- [x] Apply the branding watermark overlay — code path correct (text handle + logo image, 5 position presets), but see asset-quality note below
+- [x] Implement the word-by-word text overlay renderer — mechanically correct, real-render verified
+- [ ] v2 candidate: Remotion composition consuming the same alignment JSON, if higher typographic fidelity is wanted later
+- [x] Apply the branding watermark overlay — code path correct (text handle + logo image, 5 position presets)
 - [x] Output 1080×1920 H.264 MP4 to `render/{message_id}.mp4`; verify duration/format against target platform limits — confirmed via a real render in review (1080×1920, h264, audio present, duration matches recitation length)
-- [x] Integration test: render a sample end-to-end and visually spot-check output — automated real-ffmpeg test passes; an actual human visual spot-check (done in this review, see below) caught issues the automated test structurally can't
-- [x] **Fix: `SurahHeader` color renders wrong.** Resolved: corrected hex to BGR `&H0037AFD4` (Gold #D4AF37). Upgraded karaoke subtitles to timed dialogue events with inline color overrides (`\c`), eliminating Arabic RTL word order flipping caused by libass `\k` handling.
-- [x] **Fix: `BRANDING_FONT_PATH` is parsed but never used.** Resolved: wired `branding_font_path` through `RenderSettings` -> `RenderService` -> `KaraokeSubtitleGenerator`, added TTF font family extraction (`Amiri`), provided canonical font files, and passed `fontsdir=...` to FFmpeg `ass` filter.
-- [x] **Replace placeholder assets before this is actually publish-ready.** Resolved: replaced `001_default_plate.png` with high-resolution 1080x1920 illuminated Quranic background plate and `logo.png` with transparent 240x240 circular gold calligraphy seal. Reconciled procedural background fallback color across modules (`0x0b0e14`).
+- [x] Integration test: render a sample end-to-end and visually spot-check output
+- [x] **Fixed and confirmed: `SurahHeader` gold color.** Now `&H0037AFD4`, renders correctly as gold. Verified visually.
+- [x] **Fixed and confirmed: real font now wired end-to-end.** `get_font_family_name_from_ttf()` reads the actual TTF name table, and `fontsdir` is now passed to the ffmpeg `ass=` filter. Amiri renders correctly. Verified visually.
+- [x] **Fixed and confirmed: real background and logo assets.** Both replaced with genuinely good, on-brand designs (mosque archway/lantern photo, gold Islamic roundel logo). Verified visually.
+- [x] **Fixed and confirmed: RTL word order using non-interleaved clip architecture.** Resolved: eliminated all per-word inline override tags inside the Arabic text field. The entire continuous line is rendered unbroken on Layer 0 (dim), while word highlights (Layer 2 gold, Layer 1 white) use precise `\clip(x1, 0, x2, 1920)` bounds computed via OpenType glyph metrics with `uharfbuzz`. This preserves 100% native HarfBuzz Right-to-Left Arabic text shaping and eliminates word transposition on all lines.
+- [ ] Related systemic gap worth naming: the QA gate (Phase 5) validates that *recognized* text matches canonical Quran text, but nothing currently validates that the *rendered video* displays that text in correct visual order. Those are different guarantees — worth a lightweight visual/OCR regression check on rendered output eventually, not just the text pipeline
 
 ## Phase 7 — Publishing (SPEC §4.7)
 - [ ] Integrate the multi-platform posting API client

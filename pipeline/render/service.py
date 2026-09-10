@@ -66,7 +66,9 @@ class RenderService:
             font_name = "Traditional Arabic"
             if branding_font_path and branding_font_path.is_file():
                 font_name = get_font_family_name_from_ttf(branding_font_path)
-            self.subtitle_generator = KaraokeSubtitleGenerator(font_name=font_name)
+            self.subtitle_generator = KaraokeSubtitleGenerator(
+                font_name=font_name, font_path=branding_font_path
+            )
 
         self.renderer = renderer or FFmpegRenderer()
         self.branding_logo_path = branding_logo_path

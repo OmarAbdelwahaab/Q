@@ -148,12 +148,18 @@ class TestKaraokeSubtitleGenerator(unittest.TestCase):
         self.assertIn("PlayResX: 1080", ass_script)
         self.assertIn("PlayResY: 1920", ass_script)
         self.assertIn("Style: QuranText,Amiri,72", ass_script)
+        self.assertIn("Style: QuranDim,Amiri,72", ass_script)
+        self.assertIn("Style: QuranActive,Amiri,72", ass_script)
+        self.assertIn("Style: QuranCompleted,Amiri,72", ass_script)
         self.assertIn("سورة الفاتحة • الآية 1", ass_script)
-        # Check BGR gold for SurahHeader (&H0037AFD4)
+        # Check BGR gold for SurahHeader and active highlight (&H0037AFD4)
         self.assertIn("&H0037AFD4", ass_script)
-        # Check Bidi color tags: active word in gold (&H0037AFD4), upcoming in dim (&H90707070), completed in white (&H00FFFFFF)
-        self.assertIn(r"{\c&H0037AFD4&}بِسْمِ {\c&H90707070&}اللَّهِ", ass_script)
-        self.assertIn(r"{\c&H00FFFFFF&}بِسْمِ {\c&H0037AFD4&}اللَّهِ", ass_script)
+        # Check that unbroken Arabic line is rendered without interleaved tags
+        self.assertIn(r"{\an5\pos(540,960)}بِسْمِ اللَّهِ", ass_script)
+        # Check clip-based highlight reveals
+        self.assertIn(r"\clip(", ass_script)
+        self.assertIn("QuranActive", ass_script)
+        self.assertIn("QuranCompleted", ass_script)
 
     def test_get_font_family_name_from_ttf(self) -> None:
         from pipeline.render.subtitles import get_font_family_name_from_ttf
@@ -198,7 +204,8 @@ class TestKaraokeSubtitleGenerator(unittest.TestCase):
             self.assertTrue(output_file.is_file())
             content = output_file.read_text(encoding="utf-8")
             self.assertIn("Dialogue:", content)
-            self.assertIn(r"{\c&H0037AFD4&}الحمد", content)
+            self.assertIn("QuranActive", content)
+            self.assertIn(r"\clip(", content)
 
 
 class TestFFmpegRenderer(unittest.TestCase):
