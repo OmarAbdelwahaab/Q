@@ -61,12 +61,12 @@ looked up rather than re-derived.
 - [ ] Related systemic gap worth naming: the QA gate (Phase 5) validates that *recognized* text matches canonical Quran text, but nothing currently validates that the *rendered video* displays that text in correct visual order. Those are different guarantees — worth a lightweight visual/OCR regression check on rendered output eventually, not just the text pipeline
 
 ## Phase 7 — Publishing (SPEC §4.7)
-- [ ] Integrate the multi-platform posting API client
-- [ ] Build caption/hashtag templating (surah name, ayah range, branding)
-- [ ] Configure target platform list (TikTok, IG Reels, YouTube Shorts, Facebook, X, Telegram repost)
-- [ ] Store per-platform response/status in `publish/{message_id}.json`
-- [ ] Implement idempotency check — skip if `message_id` already published
-- [ ] Validate in the provider's sandbox/draft mode before enabling live posting
+- [x] Integrate the multi-platform posting API client — implemented `MultiPlatformPublishClient` (with HTTP 429/50x retry backoff and response parsing) and `StubPublishClient` for hermetic testing and dry-run execution
+- [x] Build caption/hashtag templating (surah name, ayah range, branding) — implemented `CaptionTemplater` with Arabic Quranic reference formatting (`سورة {surah_name} • الآية {ayah}` or `الآيات {start}-{end}`), curated hashtags, and platform length constraint handling (e.g. X 280-char truncation, Telegram 1024-char limit)
+- [x] Configure target platform list (TikTok, IG Reels, YouTube Shorts, Facebook, X, Telegram repost) — config-driven via `PUBLISH_PLATFORMS`, default encompasses all target platforms
+- [x] Store per-platform response/status in `publish/{message_id}.json` — atomically writes artifact with post IDs, URLs, published timestamps, and draft flags
+- [x] Implement idempotency check — skip if `message_id` already published — checks `pipeline_items` state and artifact file, returning `skipped_already_published` without duplicate posting
+- [x] Validate in the provider's sandbox/draft mode before enabling live posting — configurable via `PUBLISH_DRAFT_MODE` and `--draft` CLI flag; writes draft status to artifact and platform response
 
 ## Phase 8 — Orchestration (SPEC §4.8)
 - [ ] Build the n8n workflow: Telegram trigger → ingestion → audio → recognition → alignment → QA gate → render → publish

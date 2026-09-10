@@ -280,3 +280,67 @@ class RenderSettings:
             log_level=os.getenv("LOG_LEVEL", "INFO"),
         )
 
+
+@dataclass(slots=True)
+class PublishSettings:
+    """Runtime settings for the multi-platform publishing stage."""
+
+    state_db_path: Path
+    storage_root: Path
+    publish_api_base_url: str
+    publish_api_key: str | None
+    publish_platforms: tuple[str, ...]
+    publish_draft_mode: bool
+    publish_caption_template: str | None
+    publish_default_hashtags: tuple[str, ...]
+    branding_handle: str | None
+    alert_webhook_url: str | None
+    alert_telegram_bot_token: str | None
+    alert_telegram_chat_id: str | None
+    log_level: str
+
+    @classmethod
+    def from_env(cls) -> "PublishSettings":
+        project_root = Path(os.getenv("PIPELINE_PROJECT_ROOT", Path.cwd()))
+        storage_root = Path(os.getenv("PIPELINE_STORAGE_ROOT", project_root)).resolve()
+
+        raw_platforms = os.getenv(
+            "PUBLISH_PLATFORMS",
+            "tiktok,instagram,youtube,facebook,x,telegram",
+        )
+        platforms = tuple(
+            p.strip().lower()
+            for p in raw_platforms.split(",")
+            if p.strip()
+        )
+
+        raw_hashtags = os.getenv(
+            "PUBLISH_DEFAULT_HASHTAGS",
+            "#قرآن,#تلاوة,#قرآن_كريم,#تلاوات_خاشعة,#Quran,#Islam",
+        )
+        hashtags = tuple(
+            h.strip()
+            for h in raw_hashtags.split(",")
+            if h.strip()
+        )
+
+        return cls(
+            state_db_path=Path(
+                os.getenv("STATE_DB_PATH", str(project_root / "pipeline" / "state" / "pipeline.db"))
+            ).resolve(),
+            storage_root=storage_root,
+            publish_api_base_url=os.getenv("PUBLISH_API_BASE_URL", "").rstrip("/"),
+            publish_api_key=os.getenv("PUBLISH_API_KEY") or None,
+            publish_platforms=platforms,
+            publish_draft_mode=_read_bool("PUBLISH_DRAFT_MODE", False),
+            publish_caption_template=os.getenv("PUBLISH_CAPTION_TEMPLATE") or None,
+            publish_default_hashtags=hashtags,
+            branding_handle=os.getenv("BRANDING_HANDLE") or None,
+            alert_webhook_url=os.getenv("ALERT_WEBHOOK_URL") or None,
+            alert_telegram_bot_token=os.getenv("ALERT_TELEGRAM_BOT_TOKEN")
+            or os.getenv("TELEGRAM_BOT_TOKEN")
+            or None,
+            alert_telegram_chat_id=os.getenv("ALERT_TELEGRAM_CHAT_ID") or None,
+            log_level=os.getenv("LOG_LEVEL", "INFO"),
+        )
+

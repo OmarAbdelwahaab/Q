@@ -35,6 +35,9 @@ class AlertService(Protocol):
     async def send_render_failure(self, message: str) -> None:
         """Send an alert for a rendering failure."""
 
+    async def send_publish_failure(self, message: str) -> None:
+        """Send an alert for a multi-platform publishing failure."""
+
 
 class CompositeAlertService:
     """Dispatch alerts to any configured channels and always log them."""
@@ -72,6 +75,9 @@ class CompositeAlertService:
 
     async def send_render_failure(self, message: str) -> None:
         self._dispatch("render_failure", message)
+
+    async def send_publish_failure(self, message: str) -> None:
+        self._dispatch("publish_failure", message)
 
 
     def _dispatch(
