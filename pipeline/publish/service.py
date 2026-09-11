@@ -17,6 +17,7 @@ from pipeline.publish.client import (
     PublishResponse,
 )
 from pipeline.publish.templating import CaptionTemplater
+from pipeline.publish.uploader import MediaUploader, StubMediaUploader
 
 
 class PipelineStateStore(Protocol):
@@ -49,6 +50,7 @@ class PublishService:
         state_repository: PipelineStateStore,
         alert_service: AlertService,
         client: PublishClient,
+        media_uploader: MediaUploader | None = None,
         templater: CaptionTemplater | None = None,
         default_platforms: tuple[str, ...] = (
             "tiktok",
@@ -66,6 +68,7 @@ class PublishService:
         self.state_repository = state_repository
         self.alert_service = alert_service
         self.client = client
+        self.media_uploader = media_uploader or StubMediaUploader()
         self.templater = templater or CaptionTemplater(branding_handle=branding_handle)
         self.default_platforms = default_platforms
         self.default_draft_mode = default_draft_mode
@@ -84,6 +87,7 @@ class PublishService:
         match_path: Path | None = None,
         platforms: tuple[str, ...] | None = None,
         draft_mode: bool | None = None,
+        media_urls: tuple[str, ...] | None = None,
     ) -> PublishExecutionResult:
         """Execute Phase 7 multi-platform publishing for a specified message_id."""
         target_platforms = platforms if platforms is not None else self.default_platforms
@@ -127,7 +131,20 @@ class PublishService:
             error = f"Rendered video missing for publishing: {resolved_video}"
             return await self._fail_stage(message_id, error)
 
-        # 4. Resolve match metadata for captions
+        # 4. Upload/resolve public media URL
+        if media_urls is not None:
+            resolved_media_urls = media_urls
+        else:
+            try:
+                public_url = await self.media_uploader.upload_media(
+                    resolved_video, message_id
+                )
+                resolved_media_urls = (public_url,)
+            except Exception as exc:
+                error = f"Media upload failed for video {resolved_video}: {exc}"
+                return await self._fail_stage(message_id, error)
+
+        # 5. Resolve match metadata for captions
         resolved_match = match_path or (self.storage_root / "match" / f"{message_id}.json")
         if not resolved_match.is_file():
             error = f"Match metadata missing for publishing: {resolved_match}"
@@ -143,7 +160,7 @@ class PublishService:
             error = f"Invalid match artifact {resolved_match}: {exc}"
             return await self._fail_stage(message_id, error)
 
-        # 5. Build caption
+        # 6. Build caption
         caption = self.templater.build_caption(
             surah=surah,
             ayah_start=ayah_start,
@@ -152,12 +169,14 @@ class PublishService:
             branding_handle=self.branding_handle,
         )
 
-        # 6. Execute multi-platform publishing
+        # 7. Execute multi-platform publishing
         request = PublishRequest(
             message_id=message_id,
             video_path=resolved_video,
             caption=caption,
             platforms=target_platforms,
+            media_urls=resolved_media_urls,
+            is_video=True,
             draft_mode=target_draft,
             title=self.templater.format_surah_reference(surah, ayah_start, ayah_end),
             tags=self.templater.default_hashtags,
@@ -169,13 +188,14 @@ class PublishService:
             error = f"Unexpected client error during publishing: {exc}"
             return await self._fail_stage(message_id, error)
 
-        # 7. Evaluate response and persist artifact
+        # 8. Evaluate response and persist artifact
         if response.overall_status in ("completed", "partial"):
             publish_data = {
                 "message_id": message_id,
                 "published_at": datetime.now(timezone.utc).isoformat(),
                 "draft_mode": target_draft,
                 "overall_status": response.overall_status,
+                "media_urls": list(resolved_media_urls),
                 "caption": caption,
                 "platforms": {
                     p: {

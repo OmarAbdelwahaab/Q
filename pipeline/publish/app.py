@@ -46,6 +46,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Explicit path to match JSON metadata",
     )
+    parser.add_argument(
+        "--media-url",
+        type=str,
+        default=None,
+        help="Explicit public media URL (overrides uploader)",
+    )
     return parser.parse_args(argv)
 
 
@@ -69,15 +75,35 @@ async def main(argv: list[str] | None = None) -> int:
         branding_handle=settings.branding_handle,
     )
 
-    # Determine publishing client: live multi-platform HTTP or stub
-    if settings.publish_api_base_url:
+    # Determine media uploader
+    from pipeline.publish.uploader import (
+        PublicUrlMediaUploader,
+        S3MediaUploader,
+        StubMediaUploader,
+    )
+
+    if settings.public_media_base_url:
+        media_uploader = PublicUrlMediaUploader(settings.public_media_base_url)
+    elif settings.s3_endpoint:
+        media_uploader = S3MediaUploader(
+            endpoint=settings.s3_endpoint,
+            bucket=settings.s3_bucket_render,
+            access_key=settings.s3_access_key,
+            secret_key=settings.s3_secret_key,
+            public_base_url=settings.public_media_base_url,
+        )
+    else:
+        media_uploader = StubMediaUploader()
+
+    # Determine publishing client: live Ayrshare HTTP or stub
+    if settings.publish_api_key:
         client = MultiPlatformPublishClient(
             api_base_url=settings.publish_api_base_url,
             api_key=settings.publish_api_key,
         )
     else:
         logger.info(
-            "PUBLISH_API_BASE_URL not set; utilizing StubPublishClient for publishing run"
+            "PUBLISH_API_KEY not set; utilizing StubPublishClient for publishing run"
         )
         client = StubPublishClient()
 
@@ -87,12 +113,14 @@ async def main(argv: list[str] | None = None) -> int:
         else settings.publish_platforms
     )
     draft_mode = args.draft or settings.publish_draft_mode
+    media_urls = (args.media_url,) if args.media_url else None
 
     service = PublishService(
         storage_root=settings.storage_root,
         state_repository=state_repo,
         alert_service=alert_service,
         client=client,
+        media_uploader=media_uploader,
         templater=templater,
         default_platforms=platforms,
         default_draft_mode=draft_mode,
@@ -105,6 +133,7 @@ async def main(argv: list[str] | None = None) -> int:
         match_path=args.match,
         platforms=platforms,
         draft_mode=draft_mode,
+        media_urls=media_urls,
     )
 
     if result.status in ("completed", "skipped_already_published"):

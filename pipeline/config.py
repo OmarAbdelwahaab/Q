@@ -294,6 +294,11 @@ class PublishSettings:
     publish_caption_template: str | None
     publish_default_hashtags: tuple[str, ...]
     branding_handle: str | None
+    public_media_base_url: str | None
+    s3_endpoint: str | None
+    s3_access_key: str | None
+    s3_secret_key: str | None
+    s3_bucket_render: str
     alert_webhook_url: str | None
     alert_telegram_bot_token: str | None
     alert_telegram_chat_id: str | None
@@ -324,18 +329,25 @@ class PublishSettings:
             if h.strip()
         )
 
+        raw_api_url = os.getenv("PUBLISH_API_BASE_URL", "https://app.ayrshare.com/api").rstrip("/")
+
         return cls(
             state_db_path=Path(
                 os.getenv("STATE_DB_PATH", str(project_root / "pipeline" / "state" / "pipeline.db"))
             ).resolve(),
             storage_root=storage_root,
-            publish_api_base_url=os.getenv("PUBLISH_API_BASE_URL", "").rstrip("/"),
+            publish_api_base_url=raw_api_url,
             publish_api_key=os.getenv("PUBLISH_API_KEY") or None,
             publish_platforms=platforms,
             publish_draft_mode=_read_bool("PUBLISH_DRAFT_MODE", False),
             publish_caption_template=os.getenv("PUBLISH_CAPTION_TEMPLATE") or None,
             publish_default_hashtags=hashtags,
             branding_handle=os.getenv("BRANDING_HANDLE") or None,
+            public_media_base_url=os.getenv("PUBLIC_MEDIA_BASE_URL") or None,
+            s3_endpoint=os.getenv("S3_ENDPOINT") or None,
+            s3_access_key=os.getenv("S3_ACCESS_KEY") or None,
+            s3_secret_key=os.getenv("S3_SECRET_KEY") or None,
+            s3_bucket_render=os.getenv("S3_BUCKET_RENDER", "render"),
             alert_webhook_url=os.getenv("ALERT_WEBHOOK_URL") or None,
             alert_telegram_bot_token=os.getenv("ALERT_TELEGRAM_BOT_TOKEN")
             or os.getenv("TELEGRAM_BOT_TOKEN")

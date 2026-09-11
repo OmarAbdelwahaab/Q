@@ -1,4 +1,4 @@
-"""Multi-platform publishing API client and abstractions."""
+"""Multi-platform publishing API client (Ayrshare integration and abstractions)."""
 
 from __future__ import annotations
 
@@ -12,6 +12,21 @@ from typing import Any, Protocol
 
 from pipeline.logging import get_logger
 
+# Platform mapping between pipeline names and Ayrshare provider names
+PLATFORM_TO_AYRSHARE: dict[str, str] = {
+    "x": "twitter",
+    "twitter": "twitter",
+    "tiktok": "tiktok",
+    "instagram": "instagram",
+    "youtube": "youtube",
+    "facebook": "facebook",
+    "telegram": "telegram",
+}
+
+AYRSHARE_TO_PLATFORM: dict[str, str] = {
+    "twitter": "x",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class PublishRequest:
@@ -21,6 +36,8 @@ class PublishRequest:
     video_path: Path
     caption: str
     platforms: tuple[str, ...]
+    media_urls: tuple[str, ...] = ()
+    is_video: bool = True
     draft_mode: bool = False
     title: str | None = None
     tags: tuple[str, ...] = ()
@@ -31,7 +48,7 @@ class PlatformPublishResult:
     """Individual platform publishing outcome."""
 
     platform: str
-    status: str  # "published", "draft_created", "failed", "skipped"
+    status: str  # "published", "draft_created", "pending", "failed", "skipped"
     post_id: str | None = None
     url: str | None = None
     error: str | None = None
@@ -58,11 +75,11 @@ class PublishClient(Protocol):
 
 
 class MultiPlatformPublishClient:
-    """Concrete HTTP client communicating with a unified multi-platform publishing endpoint."""
+    """Concrete client communicating with Ayrshare (POST /api/post) and compatible endpoints."""
 
     def __init__(
         self,
-        api_base_url: str,
+        api_base_url: str = "https://app.ayrshare.com/api",
         api_key: str | None = None,
         max_retries: int = 3,
         backoff_factor: float = 1.0,
@@ -75,9 +92,18 @@ class MultiPlatformPublishClient:
         self.timeout_seconds = timeout_seconds
         self.logger = get_logger(__name__, service="publish_client")
 
+    def _resolve_endpoint_url(self) -> str:
+        """Resolve the official post endpoint path (/api/post)."""
+        base = self.api_base_url
+        if base.endswith("/post"):
+            return base
+        if base.endswith("/posts"):
+            return base[:-1]  # Normalize plural to singular /post
+        return f"{base}/post"
+
     async def publish(self, request: PublishRequest) -> PublishResponse:
-        """Post the video and metadata to the unified API with retry and draft support."""
-        url = f"{self.api_base_url}/posts" if not self.api_base_url.endswith("/posts") else self.api_base_url
+        """Post the video and metadata to Ayrshare API with retry and draft support."""
+        url = self._resolve_endpoint_url()
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
@@ -85,18 +111,25 @@ class MultiPlatformPublishClient:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
+        # Map pipeline platform names (e.g. 'x') to Ayrshare platform names (e.g. 'twitter')
+        mapped_platforms = [
+            PLATFORM_TO_AYRSHARE.get(p.lower(), p.lower())
+            for p in request.platforms
+        ]
+
+        # Ayrshare official /api/post payload
         payload: dict[str, Any] = {
-            "messageId": request.message_id,
-            "videoPath": str(request.video_path),
-            "caption": request.caption,
-            "platforms": list(request.platforms),
-            "draft": request.draft_mode,
-            "sandbox": request.draft_mode,
+            "post": request.caption,
+            "platforms": mapped_platforms,
         }
+        if request.media_urls:
+            payload["mediaUrls"] = list(request.media_urls)
+            payload["isVideo"] = request.is_video
+
         if request.title:
             payload["title"] = request.title
-        if request.tags:
-            payload["tags"] = list(request.tags)
+        if request.draft_mode:
+            payload["draft"] = True
 
         body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
@@ -178,44 +211,74 @@ class MultiPlatformPublishClient:
     def _parse_api_response(
         self, request: PublishRequest, raw: dict[str, Any]
     ) -> PublishResponse:
-        """Parse diverse multi-platform API responses into standard PublishResponse."""
+        """Parse Ayrshare official API response into standard PublishResponse."""
         results: dict[str, PlatformPublishResult] = {}
         success_status = "draft_created" if request.draft_mode else "published"
 
-        # Case 1: platforms dict in response, e.g. {"platforms": {"tiktok": {"status": "success", "id": "..."}}}
-        if "platforms" in raw and isinstance(raw["platforms"], dict):
-            for platform, pdata in raw["platforms"].items():
-                if isinstance(pdata, dict):
-                    status = pdata.get("status", "success")
-                    p_status = success_status if status in ("success", "ok", "published", "draft_created") else "failed"
-                    results[platform] = PlatformPublishResult(
-                        platform=platform,
-                        status=p_status,
-                        post_id=str(pdata.get("id") or pdata.get("post_id") or ""),
-                        url=pdata.get("url") or pdata.get("postUrl"),
-                        error=pdata.get("error") or pdata.get("message"),
-                    )
+        # Ayrshare error map from errors array: e.g. [{"platform": "twitter", "message": "..."}]
+        platform_errors: dict[str, str] = {}
+        if "errors" in raw and isinstance(raw["errors"], list):
+            for err in raw["errors"]:
+                if isinstance(err, dict):
+                    p_name = str(err.get("platform", "")).lower()
+                    msg = err.get("message") or err.get("error") or "Platform publishing error"
+                    if p_name:
+                        platform_errors[p_name] = msg
+                        # Also map Ayrshare platform alias if applicable
+                        if p_name in AYRSHARE_TO_PLATFORM:
+                            platform_errors[AYRSHARE_TO_PLATFORM[p_name]] = msg
 
-        # Case 2: postIds list, e.g. {"postIds": [{"platform": "tiktok", "id": "123", "postUrl": "..."}]}
-        elif "postIds" in raw and isinstance(raw["postIds"], list):
+        # Primary Ayrshare schema: "postIds" list: [{"platform": "twitter", "status": "success", "id": "...", "postUrl": "..."}]
+        if "postIds" in raw and isinstance(raw["postIds"], list):
             for item in raw["postIds"]:
                 if isinstance(item, dict) and "platform" in item:
-                    p = str(item["platform"]).lower()
-                    status = item.get("status", "success")
-                    p_status = success_status if status in ("success", "ok", "published", "draft_created") else "failed"
+                    raw_p = str(item["platform"]).lower()
+                    # Resolve to pipeline platform name (e.g. 'twitter' -> 'x' if 'x' was requested)
+                    p = "x" if raw_p == "twitter" and "x" in request.platforms else raw_p
+
+                    status_str = item.get("status", "success").lower()
+                    if status_str in ("success", "ok", "published", "draft_created"):
+                        p_status = success_status
+                    elif status_str == "pending":
+                        p_status = "pending"
+                    else:
+                        p_status = "failed"
+
+                    err_msg = item.get("error") or platform_errors.get(raw_p) or platform_errors.get(p)
                     results[p] = PlatformPublishResult(
                         platform=p,
                         status=p_status,
                         post_id=str(item.get("id") or item.get("postId") or ""),
                         url=item.get("postUrl") or item.get("url"),
-                        error=item.get("error"),
+                        error=err_msg,
+                    )
+
+        # Secondary schema: "platforms" dict: {"platforms": {"tiktok": {"status": "success", ...}}}
+        elif "platforms" in raw and isinstance(raw["platforms"], dict):
+            for raw_p, pdata in raw["platforms"].items():
+                p = "x" if raw_p == "twitter" and "x" in request.platforms else raw_p
+                if isinstance(pdata, dict):
+                    status_str = pdata.get("status", "success").lower()
+                    p_status = success_status if status_str in ("success", "ok", "published") else "failed"
+                    results[p] = PlatformPublishResult(
+                        platform=p,
+                        status=p_status,
+                        post_id=str(pdata.get("id") or pdata.get("post_id") or ""),
+                        url=pdata.get("url") or pdata.get("postUrl"),
+                        error=pdata.get("error") or platform_errors.get(raw_p),
                     )
 
         # Fill any missing platforms from request
         for p in request.platforms:
             if p not in results:
-                # If top-level indicates success, mark as succeeded
-                if raw.get("status") in ("success", "ok", True) or "id" in raw:
+                ayr_alias = PLATFORM_TO_AYRSHARE.get(p, p)
+                if p in platform_errors or ayr_alias in platform_errors:
+                    results[p] = PlatformPublishResult(
+                        platform=p,
+                        status="failed",
+                        error=platform_errors.get(p) or platform_errors.get(ayr_alias),
+                    )
+                elif raw.get("status") in ("success", "ok", True) or "id" in raw:
                     results[p] = PlatformPublishResult(
                         platform=p,
                         status=success_status,
@@ -229,7 +292,9 @@ class MultiPlatformPublishClient:
                         error=raw.get("message") or raw.get("error") or "Unknown platform publishing failure",
                     )
 
-        success_count = sum(1 for r in results.values() if r.status in ("published", "draft_created"))
+        success_count = sum(
+            1 for r in results.values() if r.status in ("published", "draft_created", "pending")
+        )
         if success_count == len(request.platforms):
             overall_status = "completed"
         elif success_count > 0:
@@ -248,7 +313,7 @@ class MultiPlatformPublishClient:
 
 
 class StubPublishClient:
-    """Hermetic in-memory stub client for unit testing and local dry runs."""
+    """Hermetic in-memory stub client simulating Ayrshare behavior for unit testing and local dry runs."""
 
     def __init__(
         self,
@@ -264,7 +329,7 @@ class StubPublishClient:
         self.delay_seconds = delay_seconds
 
     async def publish(self, request: PublishRequest) -> PublishResponse:
-        """Simulate multi-platform publishing."""
+        """Simulate Ayrshare multi-platform publishing."""
         if self.delay_seconds > 0:
             await asyncio.sleep(self.delay_seconds)
 
@@ -304,7 +369,9 @@ class StubPublishClient:
                     url=f"https://{p}.com/post/stub_{p}_{request.message_id}",
                 )
 
-        success_count = sum(1 for r in results.values() if r.status in ("published", "draft_created"))
+        success_count = sum(
+            1 for r in results.values() if r.status in ("published", "draft_created", "pending")
+        )
         if success_count == len(request.platforms):
             overall = "completed"
         elif success_count > 0:

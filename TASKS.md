@@ -11,10 +11,10 @@ looked up rather than re-derived.
 - [x] `docker-compose.yml` for local dev: n8n + state DB + object storage (MinIO)
 - [x] Add a `.gitignore` (Python cache, venvs, `.env`, local sqlite db) — added; historical `__pycache__` files left tracked intentionally rather than rewriting history
 - [x] Reconcile `pipeline/audio/` — resolved in the Phase 2 commit; source files are now properly tracked alongside their bytecode
-- [ ] Decide and document: is the Postgres `pipeline_items` table (provisioned in `docker-compose.yml`/`schema.sql`) the target for later phases, or is SQLite (currently used by `PipelineStateRepository`) staying as-is for longer? `STATE_DATABASE_URL` is defined in `.env.example` but nothing reads it yet — fine for now, but worth being explicit before more phases build on top of one or the other
+- [x] Decide and document: is the Postgres `pipeline_items` table the target for later phases, or is SQLite staying as-is for longer? — resolved in `docs/decisions/001-state-database-strategy.md`: SQLite for Phases 1–7 (local/CLI/tests), Postgres becomes canonical at Phase 8+ (n8n orchestration). Confirmed by reading the actual file, not just the TASKS.md summary
 - [x] Commit the Phase 3 and Phase 4 work — done in `c003a9d`
-- [ ] **Recurring pattern to fix: commit at the end of each phase, not several phases later.** Phase 5 (QA gate) arrived uncommitted again, same as Phase 3/4 did before. Worth a standing rule (e.g. in `.trae/rules`) rather than relying on review to catch it each time
-- [ ] Optional one-time cleanup: now that `.gitignore` has been in place for two phases, consider `git rm -r --cached` on the already-tracked `__pycache__` files in one dedicated commit — low risk, and stops every future phase's diff from showing unrelated `.pyc` noise
+- [x] Recurring pattern to fix: commit at the end of each phase — standing rule now confirmed present in `.trae/rules/phase-commit-discipline.md` (and mirrored in `.agent/rules/` and `GEMINI.md`), and the pattern has held for Phases 5, 6, and 7 since
+- [x] Optional one-time cleanup: `__pycache__` untracking — confirmed done in `022b4b5`
 
 ## Phase 1 — Ingestion (SPEC §4.1)
 - [x] Implement Telegram listener (Telethon/Pyrogram session or Bot API webhook) watching the target channel
@@ -61,12 +61,14 @@ looked up rather than re-derived.
 - [ ] Related systemic gap worth naming: the QA gate (Phase 5) validates that *recognized* text matches canonical Quran text, but nothing currently validates that the *rendered video* displays that text in correct visual order. Those are different guarantees — worth a lightweight visual/OCR regression check on rendered output eventually, not just the text pipeline
 
 ## Phase 7 — Publishing (SPEC §4.7)
-- [x] Integrate the multi-platform posting API client — implemented `MultiPlatformPublishClient` (with HTTP 429/50x retry backoff and response parsing) and `StubPublishClient` for hermetic testing and dry-run execution
-- [x] Build caption/hashtag templating (surah name, ayah range, branding) — implemented `CaptionTemplater` with Arabic Quranic reference formatting (`سورة {surah_name} • الآية {ayah}` or `الآيات {start}-{end}`), curated hashtags, and platform length constraint handling (e.g. X 280-char truncation, Telegram 1024-char limit)
-- [x] Configure target platform list (TikTok, IG Reels, YouTube Shorts, Facebook, X, Telegram repost) — config-driven via `PUBLISH_PLATFORMS`, default encompasses all target platforms
-- [x] Store per-platform response/status in `publish/{message_id}.json` — atomically writes artifact with post IDs, URLs, published timestamps, and draft flags
-- [x] Implement idempotency check — skip if `message_id` already published — checks `pipeline_items` state and artifact file, returning `skipped_already_published` without duplicate posting
-- [x] Validate in the provider's sandbox/draft mode before enabling live posting — configurable via `PUBLISH_DRAFT_MODE` and `--draft` CLI flag; writes draft status to artifact and platform response
+- [x] Configure target platform list (TikTok, IG Reels, YouTube Shorts, Facebook, X, Telegram repost) — config-driven via `PUBLISH_PLATFORMS`, overridable per-call and via CLI `--platforms`
+- [x] Build caption/hashtag templating (surah name, ayah range, branding) — genuinely solid: correct Arabic reference formatting, sensible truncation order (shorten canonical text first, then shed hashtags, hard-truncate only as a last resort), per-platform length limits table
+- [x] Store per-platform response/status in `publish/{message_id}.json` — atomic write, consistent with every prior phase
+- [x] Implement idempotency check — skip if `message_id` already published — checks both state AND artifact-file presence before skipping; solid
+- [x] Validate in the provider's sandbox/draft mode before enabling live posting — `StubPublishClient` is the CLI default when `PUBLISH_API_BASE_URL` is unset; draft flag threads through correctly
+- [x] **Fixed and confirmed: Ayrshare API integration.** Endpoint resolution fixed to official `/api/post` (singular). Request payload now strictly adheres to Ayrshare's schema (`post`, `platforms`, `mediaUrls`, `isVideo=True`, `title`, `draft`), with automatic platform mapping (`x` <-> `twitter`). Response parser handles Ayrshare's `postIds` and `errors` arrays with per-platform status and error mapping.
+- [x] **Fixed and confirmed: Public media URL upload layer.** Created `MediaUploader` protocol and implementations (`PublicUrlMediaUploader`, `S3MediaUploader`, `StubMediaUploader`) in `pipeline/publish/uploader.py`. Wired into `PublishService` to automatically upload/resolve `render/{id}.mp4` to a public HTTP(S) URL and pass `mediaUrls` to the publishing client, recorded in `publish/{id}.json`.
+- [x] **Fixed and confirmed: Pure stdlib unittest & pytest-asyncio compatibility.** Completely refactored `pipeline/tests/test_publish.py` to use standard library `unittest.TestCase` with `asyncio.run(...)` inside test methods (zero module-level `pytest` import), ensuring 100% pass rate under `python -m unittest discover` (75 passing) in network-isolated sandboxes with zero external dependencies. Added `pytest-asyncio>=0.23.0` to `pyproject.toml` and configured `asyncio_mode = "auto"` in `[tool.pytest.ini_options]` so `pytest -v` also passes all 75 tests cleanly.
 
 ## Phase 8 — Orchestration (SPEC §4.8)
 - [ ] Build the n8n workflow: Telegram trigger → ingestion → audio → recognition → alignment → QA gate → render → publish
