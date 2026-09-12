@@ -74,6 +74,7 @@ class S3MediaUploader:
 
         def _do_upload() -> None:
             # Check if boto3 is installed for signed S3 upload
+            boto_error: Exception | None = None
             try:
                 import boto3  # type: ignore[import-not-found]
                 from botocore.client import Config  # type: ignore[import-not-found]
@@ -93,8 +94,9 @@ class S3MediaUploader:
                 )
                 return
             except Exception as exc:
+                boto_error = exc
                 self.logger.warning(
-                    "Boto3 S3 upload failed or credentials unavailable; proceeding with HTTP PUT fallback",
+                    "Boto3 S3 upload failed or credentials unavailable; attempting HTTP PUT fallback",
                     extra={"error": str(exc)},
                 )
 
@@ -105,11 +107,13 @@ class S3MediaUploader:
             try:
                 with urllib.request.urlopen(req, timeout=30):
                     return
-            except urllib.error.URLError as exc:
-                self.logger.warning(
-                    "Direct S3 HTTP PUT failed; proceeding with public URL",
-                    extra={"error": str(exc), "public_url": public_url},
+            except Exception as exc:
+                err_msg = (
+                    f"S3 media upload failed for {local_path} to {upload_url}: "
+                    f"boto3 error: {boto_error}; HTTP PUT error: {exc}"
                 )
+                self.logger.error("Media upload failed completely", extra={"error": err_msg})
+                raise RuntimeError(err_msg) from exc
 
         await loop.run_in_executor(None, _do_upload)
         return public_url
