@@ -356,3 +356,59 @@ class PublishSettings:
             log_level=os.getenv("LOG_LEVEL", "INFO"),
         )
 
+
+@dataclass(slots=True)
+class OrchestrationSettings:
+    """Runtime settings for the end-to-end pipeline orchestrator and scheduler."""
+
+    state_db_path: Path
+    state_database_url: str | None
+    storage_root: Path
+    posting_window_enabled: bool
+    posting_window_start_hour: int
+    posting_window_end_hour: int
+    posting_window_timezone: str
+    rate_limit_min_interval_seconds: int
+    alert_webhook_url: str | None
+    alert_telegram_bot_token: str | None
+    alert_telegram_chat_id: str | None
+    log_level: str
+
+    @classmethod
+    def from_env(cls) -> "OrchestrationSettings":
+        project_root = Path(os.getenv("PIPELINE_PROJECT_ROOT", Path.cwd()))
+        storage_root = Path(os.getenv("PIPELINE_STORAGE_ROOT", project_root)).resolve()
+        state_db_path = Path(
+            os.getenv("STATE_DB_PATH", str(project_root / "pipeline" / "state" / "pipeline.db"))
+        ).resolve()
+        state_database_url = os.getenv("STATE_DATABASE_URL") or None
+
+        start_hour = _read_int("POSTING_WINDOW_START_HOUR", 9)
+        end_hour = _read_int("POSTING_WINDOW_END_HOUR", 23)
+        if start_hour is None or not (0 <= start_hour <= 23):
+            raise ValueError("POSTING_WINDOW_START_HOUR must be between 0 and 23.")
+        if end_hour is None or not (0 <= end_hour <= 23):
+            raise ValueError("POSTING_WINDOW_END_HOUR must be between 0 and 23.")
+
+        min_interval = _read_int("RATE_LIMIT_MIN_INTERVAL_SECONDS", 1800)
+        if min_interval is None or min_interval < 0:
+            raise ValueError("RATE_LIMIT_MIN_INTERVAL_SECONDS must be zero or greater.")
+
+        return cls(
+            state_db_path=state_db_path,
+            state_database_url=state_database_url,
+            storage_root=storage_root,
+            posting_window_enabled=_read_bool("POSTING_WINDOW_ENABLED", False),
+            posting_window_start_hour=start_hour,
+            posting_window_end_hour=end_hour,
+            posting_window_timezone=os.getenv("POSTING_WINDOW_TIMEZONE", "UTC"),
+            rate_limit_min_interval_seconds=min_interval,
+            alert_webhook_url=os.getenv("ALERT_WEBHOOK_URL") or None,
+            alert_telegram_bot_token=os.getenv("ALERT_TELEGRAM_BOT_TOKEN")
+            or os.getenv("TELEGRAM_BOT_TOKEN")
+            or None,
+            alert_telegram_chat_id=os.getenv("ALERT_TELEGRAM_CHAT_ID") or None,
+            log_level=os.getenv("LOG_LEVEL", "INFO"),
+        )
+
+

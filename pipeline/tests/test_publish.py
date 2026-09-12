@@ -197,7 +197,7 @@ class MediaUploaderTests(unittest.TestCase):
                 public_base_url="https://cdn.example.com/render",
             )
             with patch("urllib.request.urlopen"):
-                with patch("boto3.client", side_effect=Exception("no boto3")):
+                with patch.dict("sys.modules", {"boto3": None}):
                     url = asyncio.run(uploader.upload_media(file_path, 303))
                     self.assertEqual(url, "https://cdn.example.com/render/303.mp4")
 
@@ -211,10 +211,11 @@ class MediaUploaderTests(unittest.TestCase):
                 bucket="render",
             )
             with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("connection refused")):
-                with patch("boto3.client", side_effect=Exception("no boto3")):
+                with patch.dict("sys.modules", {"boto3": None}):
                     with self.assertRaises(RuntimeError) as ctx:
                         asyncio.run(uploader.upload_media(file_path, 304))
                     self.assertIn("S3 media upload failed", str(ctx.exception))
+
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,98 @@
+{
+  "name": "Quran Pipeline Error Handler",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "e1111111-1111-1111-1111-111111111111",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const execution = $json.execution || {};\nconst error = execution.error || {};\nconst lastNode = execution.lastNodeExecuted || 'unknown';\nconst messageId = execution.data?.message?.message_id || 0;\nconst errorMessage = error.message || 'Unknown pipeline execution failure';\nreturn [{ json: { message_id: messageId, node: lastNode, error: errorMessage, timestamp: new Date().toISOString() } }];"
+      },
+      "id": "e2222222-2222-2222-2222-222222222222",
+      "name": "Format Error Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "command": "python -c \"from pipeline.state.repository import PipelineStateRepository; from pipeline.config import OrchestrationSettings; s = OrchestrationSettings.from_env(); repo = PipelineStateRepository(database_url=s.state_database_url) if s.state_database_url else PipelineStateRepository(database_path=s.state_db_path); repo.upsert_stage({{$json[\"message_id\"]}}, '{{$json[\"node\"]}}', 'failed', '''{{$json[\"error\"]}}''')\""
+      },
+      "id": "e3333333-3333-3333-3333-333333333333",
+      "name": "Update State Store Failed",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.ALERT_WEBHOOK_URL}}",
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"event\": \"pipeline_node_failed\", \"message_id\": {{$json[\"message_id\"]}}, \"node\": \"{{$json[\"node\"]}}\", \"error\": \"{{$json[\"error\"]}}\", \"timestamp\": \"{{$json[\"timestamp\"]}}\"}"
+      },
+      "id": "e4444444-4444-4444-4444-444444444444",
+      "name": "Send Pipeline Failure Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        900,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Format Error Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Error Context": {
+      "main": [
+        [
+          {
+            "node": "Update State Store Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update State Store Failed": {
+      "main": [
+        [
+          {
+            "node": "Send Pipeline Failure Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false
+}
