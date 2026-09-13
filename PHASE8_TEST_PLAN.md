@@ -46,10 +46,15 @@ Phase 8 validates the end-to-end workflow orchestration, time-of-day posting-win
 | **State Store** | Row to dict conversion helper | `PipelineStateRepository` | Safely converts None, dicts, Row objects, and tuple rows |
 | **State Store** | Claim execution atomic token | `PipelineStateRepository` | Grants claim on fresh items; rejects concurrent runs (`active_execution`) & completed items; `--force` overrides |
 | **State Store** | Reserve publish slot atomic token | `PipelineStateRepository` | Reserves slot atomically; blocks concurrent worker reservations inside rate-limit window |
+| **State Store** | Multi-threaded claim contention | `PipelineStateRepository` | 8 concurrent threads race for same ID; exactly 1 acquires claim, 7 rejected with `active_execution` |
+| **State Store** | Multi-threaded reserve contention | `PipelineStateRepository` | 8 concurrent threads race for rate-limit slot; exactly 1 acquires slot, 7 blocked with `Rate limit active` |
+| **State Store** | PostgreSQL advisory xact locks | `PipelineStateRepository` | Asserts PostgreSQL queries execute `pg_advisory_xact_lock` for claim and reserve transactions |
 | **State Store** | Connection pool lifecycle & close | `PipelineStateRepository` | Safe pool shutdown on `close()`; no-op on SQLite |
 | **Orchestrator** | Happy path execution | `PipelineOrchestrator` | Runs audio $\to$ recognition $\to$ alignment $\to$ QA gate $\to$ render $\to$ publish |
 | **Orchestrator** | Idempotency enforcement | `PipelineOrchestrator` | Skips already published message without executing any stage |
 | **Orchestrator** | Active execution lock skip | `PipelineOrchestrator` | Detects concurrent worker claim and safely skips with `skipped_active_execution` (exit 0) |
+| **Orchestrator** | Scheduled outcome retry non-deadlock | `PipelineOrchestrator` | Message deferred by closed window resets claim; subsequent run when window opens completes normally |
+| **Orchestrator** | Downstream failure unblocks others | `PipelineOrchestrator` | Render failure on message A leaves publish unreserved; message B runs immediately and publishes cleanly |
 | **Orchestrator** | QA Gate rejection halt | `PipelineOrchestrator` | Rejection stops pipeline immediately; render and publish are never called |
 | **Orchestrator** | Stage failure halt & alert | `PipelineOrchestrator` | Stage failure stops downstream execution, alerts, and returns failed status |
 | **Orchestrator** | Scheduler pauses when closed | `PipelineOrchestrator` | Outside window pauses before render/publish, records `scheduled` state |

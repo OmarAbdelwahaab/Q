@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import tempfile
+import threading
 import unittest
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -333,6 +335,80 @@ class PipelineStateRepositoryTests(unittest.TestCase):
         mock_pool.close.assert_called_once()
         self.assertIsNone(repo_pg._pool)
 
+    def test_concurrent_threads_claim_execution_mutual_exclusion(self) -> None:
+        """Verify that under real multi-threaded concurrent contention, exactly 1 thread claims."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = PipelineStateRepository(database_path=Path(temp_dir) / "state.db")
+            num_threads = 8
+            barrier = threading.Barrier(num_threads)
+            results: list[tuple[bool, str]] = []
+
+            def worker() -> None:
+                barrier.wait()
+                res = repo.claim_execution(777, stage="orchestration")
+                results.append(res)
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+                futures = [executor.submit(worker) for _ in range(num_threads)]
+                concurrent.futures.wait(futures)
+
+            claimed = [r for r in results if r[0] is True]
+            rejected = [r for r in results if r[0] is False]
+            self.assertEqual(len(claimed), 1, "Exactly one thread must acquire execution claim")
+            self.assertEqual(len(rejected), num_threads - 1, "All other concurrent threads must be rejected")
+            for _, reason in rejected:
+                self.assertEqual(reason, "active_execution")
+
+    def test_concurrent_threads_reserve_publish_slot_mutual_exclusion(self) -> None:
+        """Verify that under real multi-threaded concurrent contention, exactly 1 thread reserves the slot."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = PipelineStateRepository(database_path=Path(temp_dir) / "state.db")
+            num_threads = 8
+            barrier = threading.Barrier(num_threads)
+            results: list[tuple[bool, float, str]] = []
+
+            def worker(msg_id: int) -> None:
+                barrier.wait()
+                res = repo.reserve_publish_slot(msg_id, min_interval_seconds=1800)
+                results.append(res)
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+                futures = [executor.submit(worker, 1000 + i) for i in range(num_threads)]
+                concurrent.futures.wait(futures)
+
+            reserved = [r for r in results if r[0] is True]
+            rejected = [r for r in results if r[0] is False]
+            self.assertEqual(len(reserved), 1, "Exactly one thread must acquire publish slot reservation")
+            self.assertEqual(len(rejected), num_threads - 1, "All other concurrent threads must be rate-limited")
+            for _, wait_s, reason in rejected:
+                self.assertGreater(wait_s, 0.0)
+                self.assertIn("Rate limit active", reason)
+
+    def test_postgres_advisory_lock_queries(self) -> None:
+        """Verify that PostgreSQL backend uses pg_advisory_xact_lock in transactions."""
+        repo = PipelineStateRepository.__new__(PipelineStateRepository)
+        repo.backend = "postgres"
+        repo._placeholder = "%s"
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_conn.cursor.return_value = mock_cur
+        repo._connect = MagicMock(return_value=mock_conn)
+
+        # 1. claim_execution issues pg_advisory_xact_lock on message_id
+        mock_cur.fetchone.return_value = None  # No existing row
+        claimed, reason = repo.claim_execution(555)
+        self.assertTrue(claimed)
+        executed_sqls = [call[0][0] for call in mock_cur.execute.call_args_list]
+        self.assertTrue(any("pg_advisory_xact_lock" in sql and "claim_execution_" in sql for sql in executed_sqls))
+
+        # 2. reserve_publish_slot issues pg_advisory_xact_lock on global slot
+        mock_cur.reset_mock()
+        mock_cur.fetchone.return_value = None
+        reserved, wait_s, reason = repo.reserve_publish_slot(666, min_interval_seconds=1800)
+        self.assertTrue(reserved)
+        executed_sqls_reserve = [call[0][0] for call in mock_cur.execute.call_args_list]
+        self.assertTrue(any("pg_advisory_xact_lock" in sql and "reserve_publish_slot" in sql for sql in executed_sqls_reserve))
+
 
 # ---------------------------------------------------------------------------
 # 3. PipelineOrchestrator End-to-End Tests
@@ -600,6 +676,7 @@ class PipelineOrchestratorTests(unittest.TestCase):
         self.mock_recognition.recognize = AsyncMock(return_value=RecognitionResult(402, "completed", None, None))
         self.mock_alignment.align = AsyncMock(return_value=AlignmentResult(402, "completed", None, 1.0))
         self.mock_qa_gate.evaluate = AsyncMock(return_value=QAGateResult(402, "approved", True))
+        self.mock_render.render = AsyncMock(return_value=RenderResult(402, "completed", None, 10.0))
 
         summary = asyncio.run(
             self.orchestrator.run(message_id=402, enforce_scheduler=True, wait_for_window=False)
@@ -607,8 +684,98 @@ class PipelineOrchestratorTests(unittest.TestCase):
 
         self.assertEqual(summary.status, "scheduled")
         self.assertIn("Rate limit active", summary.error or "")
-        self.mock_render.render.assert_not_called()
+        self.mock_render.render.assert_awaited_once()
         self.mock_publish.publish.assert_not_called()
+
+        # Verify orchestration claim was safely released as scheduled (not deadlocked in processing)
+        orch_stage = self.state_repo.fetch_stage(402, "orchestration")
+        self.assertIsNotNone(orch_stage)
+        self.assertEqual(orch_stage["status"], "scheduled")
+
+    def test_scheduled_outcome_retry_does_not_deadlock(self) -> None:
+        """Verify Finding 1 fix: message deferred by closed window is NOT permanently deadlocked on retry."""
+        # Step A: Run with closed scheduler and wait_for_window=False
+        closed_scheduler = PostingWindowScheduler(
+            enabled=True, start_hour=9, end_hour=23, timezone_name="UTC"
+        )
+        self.orchestrator.scheduler = closed_scheduler
+        frozen_time = datetime(2026, 9, 12, 3, 0, tzinfo=timezone.utc)  # Outside window
+
+        self.mock_audio.extract = AsyncMock(return_value=AudioExtractionResult(888, "completed", None, None))
+        self.mock_recognition.recognize = AsyncMock(return_value=RecognitionResult(888, "completed", None, None))
+        self.mock_alignment.align = AsyncMock(return_value=AlignmentResult(888, "completed", None, 1.0))
+        self.mock_qa_gate.evaluate = AsyncMock(return_value=QAGateResult(888, "approved", True))
+
+        with patch("pipeline.orchestration.scheduler.datetime") as mock_dt:
+            mock_dt.now.return_value = frozen_time
+            mock_dt.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+
+            summary1 = asyncio.run(
+                self.orchestrator.run(message_id=888, enforce_scheduler=True, wait_for_window=False)
+            )
+
+        self.assertEqual(summary1.status, "scheduled")
+
+        # Crucial check: orchestration claim MUST NOT be left in 'processing'
+        orch_row = self.state_repo.fetch_stage(888, "orchestration")
+        self.assertIsNotNone(orch_row)
+        self.assertEqual(orch_row["status"], "scheduled")
+
+        # Step B: Re-run the SAME message when posting window opens, WITHOUT --force
+        open_time = datetime(2026, 9, 12, 10, 0, tzinfo=timezone.utc)  # Inside window
+        self.mock_render.render = AsyncMock(return_value=RenderResult(888, "completed", None, 10.0))
+        self.mock_publish.publish = AsyncMock(return_value=PublishExecutionResult(888, "completed", None))
+
+        with patch("pipeline.orchestration.scheduler.datetime") as mock_dt:
+            mock_dt.now.return_value = open_time
+            mock_dt.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+
+            summary2 = asyncio.run(
+                self.orchestrator.run(message_id=888, enforce_scheduler=True, wait_for_window=False, force=False)
+            )
+
+        # Must NOT be skipped_active_execution; must succeed completely!
+        self.assertNotEqual(summary2.status, "skipped_active_execution")
+        self.assertEqual(summary2.status, "completed")
+        self.mock_render.render.assert_awaited_once()
+        self.mock_publish.publish.assert_awaited_once()
+
+    def test_downstream_render_failure_does_not_dangle_publish_reservation(self) -> None:
+        """Verify Finding 2 fix: render failure on message A does not block unrelated message B."""
+        open_scheduler = PostingWindowScheduler(
+            enabled=True, start_hour=0, end_hour=23, timezone_name="UTC", min_interval_seconds=1800
+        )
+        self.orchestrator.scheduler = open_scheduler
+
+        # 1. Message 901 runs and fails in render stage
+        self.mock_audio.extract = AsyncMock(return_value=AudioExtractionResult(901, "completed", None, None))
+        self.mock_recognition.recognize = AsyncMock(return_value=RecognitionResult(901, "completed", None, None))
+        self.mock_alignment.align = AsyncMock(return_value=AlignmentResult(901, "completed", None, 1.0))
+        self.mock_qa_gate.evaluate = AsyncMock(return_value=QAGateResult(901, "approved", True))
+        self.mock_render.render = AsyncMock(
+            return_value=RenderResult(901, "failed", None, None, error="GPU out of memory")
+        )
+
+        summary_a = asyncio.run(self.orchestrator.run(message_id=901, enforce_scheduler=True))
+        self.assertEqual(summary_a.status, "failed")
+
+        # Crucial check: message 901 must NOT have left publish stage in 'processing'
+        pub_row_a = self.state_repo.fetch_stage(901, "publish")
+        self.assertTrue(pub_row_a is None or pub_row_a["status"] != "processing")
+
+        # 2. Message 902 (completely unrelated) runs immediately after
+        self.mock_audio.extract = AsyncMock(return_value=AudioExtractionResult(902, "completed", None, None))
+        self.mock_recognition.recognize = AsyncMock(return_value=RecognitionResult(902, "completed", None, None))
+        self.mock_alignment.align = AsyncMock(return_value=AlignmentResult(902, "completed", None, 1.0))
+        self.mock_qa_gate.evaluate = AsyncMock(return_value=QAGateResult(902, "approved", True))
+        self.mock_render.render = AsyncMock(return_value=RenderResult(902, "completed", None, 10.0))
+        self.mock_publish.publish = AsyncMock(return_value=PublishExecutionResult(902, "completed", None))
+
+        summary_b = asyncio.run(self.orchestrator.run(message_id=902, enforce_scheduler=True))
+
+        # Message 902 must NOT be told 'Rate limit active' or 'scheduled' due to message 901!
+        self.assertEqual(summary_b.status, "completed")
+        self.mock_publish.publish.assert_awaited_once()
 
 
 

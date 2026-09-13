@@ -23,12 +23,19 @@
 
 - **Concurrency & Race-Condition Resolutions (`pipeline/state/repository.py`, `pipeline/orchestration/runner.py`)**:
   - **Atomic Idempotency Claim (`claim_execution`)**:
-    - Guarded with transactional locks (`BEGIN IMMEDIATE` in SQLite, `BEGIN` in PostgreSQL).
+    - Guarded with transactional locks (`BEGIN IMMEDIATE` in SQLite, and `SELECT pg_advisory_xact_lock(hashtext('claim_execution_' || CAST(? AS text)))` in PostgreSQL).
     - Concurrent runs for the same `message_id` return `(False, "active_execution")`, causing the worker to exit cleanly with status `skipped_active_execution` (exit code 0) rather than executing parallel colliding passes.
     - Added `--force` CLI flag allowing operator override for intentional manual re-runs.
-  - **Atomic Rate-Limit Reservation (`reserve_publish_slot`)**:
-    - Evaluates the rate-limit window atomically against both completed posts and active reservations from other concurrent workers.
-    - Prevents near-simultaneous triggers from obtaining green lights in the same rate-limit window.
+  - **Resolution of Deferred "scheduled" Message Deadlock**:
+    - On every early return for `status="scheduled"` (posting window pause or rate-limit wait), `runner.py` explicitly invokes `release_execution_claim(message_id, "orchestration", "scheduled", reason)`.
+    - When retried later (after window opens or rate-limit interval expires), the message is claimed cleanly without `--force`, preventing permanent deadlocks.
+  - **Atomic Rate-Limit Reservation Placement & Expiration**:
+    - `reserve_publish_slot()` is executed immediately before `publish_service.publish()` (step 8) rather than before the lengthy video render step (step 7).
+    - If video render fails, the rate-limit slot is never reserved, ensuring unrelated QA-approved messages arriving immediately after are never blocked.
+    - Added a 300s timeout on in-flight `status='processing'` reservations to prevent crashed workers from blocking the rate-limit window indefinitely.
+    - Guaranteed PostgreSQL cross-worker mutual exclusion via `SELECT pg_advisory_xact_lock(hashtext('reserve_publish_slot'))`.
+  - **Real Multi-Threaded Concurrency Testing**:
+    - Added true concurrent thread tests using `concurrent.futures.ThreadPoolExecutor` and `threading.Barrier` exercising SQLite file locks and Postgres lock semantics under simultaneous multi-threaded contention.
 
 - **Connection Pooling (`pipeline/state/repository.py`)**:
   - Added connection pool management supporting `psycopg_pool.ConnectionPool` (psycopg v3) and `psycopg2.pool.ThreadedConnectionPool` (psycopg2).
@@ -77,7 +84,7 @@
 ### Standard Library Discovery (`python -m unittest discover -s pipeline/tests -v`)
 Ran with zero external test dependencies:
 ```text
-Ran 106 tests in 4.200s
+Ran 111 tests in 5.441s
 
 OK
 ```
@@ -90,33 +97,34 @@ rootdir: C:\Users\COMPUMARTS\Desktop\Q
 configfile: pyproject.toml
 plugins: asyncio-0.25.3
 asyncio: mode=Mode.AUTO
-collected 106 items
+collected 111 items
 
 pipeline/tests/test_alignment.py::AlignmentTests::test_align_calculates_coverage_and_persists_artifact PASSED [  0%]
 ...
-pipeline/tests/test_orchestration.py::PipelineStateRepositoryTests::test_claim_execution_lifecycle PASSED [ 23%]
-pipeline/tests/test_orchestration.py::PipelineStateRepositoryTests::test_reserve_publish_slot_lifecycle PASSED [ 24%]
-pipeline/tests/test_orchestration.py::PipelineOrchestratorTests::test_orchestrator_skips_when_active_execution_detected PASSED [ 34%]
-pipeline/tests/test_orchestration.py::PipelineOrchestratorTests::test_orchestrator_wait_for_window_sleeps_and_proceeds PASSED [ 36%]
-pipeline/tests/test_orchestration.py::PipelineDryRunIntegrationTests::test_end_to_end_dry_run_with_draft_publishing_and_idempotency PASSED [ 42%]
+pipeline/tests/test_orchestration.py::PipelineStateRepositoryTests::test_concurrent_threads_claim_execution_mutual_exclusion PASSED [ 21%]
+pipeline/tests/test_orchestration.py::PipelineStateRepositoryTests::test_concurrent_threads_reserve_publish_slot_mutual_exclusion PASSED [ 22%]
+pipeline/tests/test_orchestration.py::PipelineStateRepositoryTests::test_postgres_advisory_lock_queries PASSED [ 23%]
+pipeline/tests/test_orchestration.py::PipelineOrchestratorTests::test_scheduled_outcome_retry_does_not_deadlock PASSED [ 39%]
+pipeline/tests/test_orchestration.py::PipelineOrchestratorTests::test_downstream_render_failure_does_not_dangle_publish_reservation PASSED [ 40%]
+pipeline/tests/test_orchestration.py::PipelineDryRunIntegrationTests::test_end_to_end_dry_run_with_draft_publishing_and_idempotency PASSED [ 45%]
 ...
 pipeline/tests/test_render.py::TestRenderRealFFmpegIntegration::test_real_ffmpeg_end_to_end_render PASSED [100%]
 
-============================= 106 passed in 4.60s =============================
+============================= 111 passed in 6.70s =============================
 ```
 
 ---
 
 ## 3. Artifact Checklist
-- [x] `pipeline/state/repository.py` (Dual-tier SQLite & PostgreSQL backend, connection pooling, `claim_execution`, `reserve_publish_slot`)
+- [x] `pipeline/state/repository.py` (Dual-tier SQLite & PostgreSQL backend, connection pooling, `claim_execution`, `reserve_publish_slot`, `release_execution_claim`, `clear_publish_reservation`, PostgreSQL advisory transaction locks)
 - [x] `pipeline/orchestration/scheduler.py` (`PostingWindowScheduler`)
-- [x] `pipeline/orchestration/runner.py` (`PipelineOrchestrator` with deduplicated `_run_stage` and atomic locks)
+- [x] `pipeline/orchestration/runner.py` (`PipelineOrchestrator` with deduplicated `_run_stage`, non-deadlocking scheduled deferral, and immediate pre-publish rate-limit reservation)
 - [x] `pipeline/orchestration/app.py` (CLI entrypoint with `--force`)
 - [x] `pipeline/orchestration/__init__.py`
 - [x] `pipeline/orchestration/workflow.json` (Main n8n workflow)
 - [x] `pipeline/orchestration/error_workflow.json` (Global error n8n workflow)
 - [x] `pipeline/config.py` (`OrchestrationSettings`)
 - [x] `.env.example` (Updated with Phase 8 scheduling variables)
-- [x] `pipeline/tests/test_orchestration.py` (30 automated unit & integration tests)
+- [x] `pipeline/tests/test_orchestration.py` (35 automated unit, multi-threaded concurrent, and integration tests)
 - [x] `PHASE8_TEST_PLAN.md`
 - [x] `PHASE8_COMPLETION_REPORT.md`

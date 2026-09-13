@@ -287,6 +287,9 @@ class PipelineOrchestrator:
                     self.state_repository.upsert_stage(
                         message_id, "publish", "scheduled", decision.reason
                     )
+                    self.state_repository.release_execution_claim(
+                        message_id, "orchestration", "scheduled", decision.reason
+                    )
                     return PipelineExecutionSummary(
                         message_id=message_id,
                         status="scheduled",
@@ -294,50 +297,6 @@ class PipelineOrchestrator:
                         duration_seconds=round(time.monotonic() - start_time, 3),
                         error=decision.reason,
                     )
-
-            # Atomic rate-limit slot reservation prevents concurrent double-publishing
-            reserved, wait_seconds, reason = self.state_repository.reserve_publish_slot(
-                message_id, min_interval_seconds=self.scheduler.min_interval_seconds
-            )
-            if not reserved:
-                stage_records["scheduler"] = {
-                    "can_post": False,
-                    "wait_seconds": wait_seconds,
-                    "reason": reason,
-                }
-                if wait_for_window:
-                    self.logger.info(
-                        "Rate limit reservation delay required",
-                        extra={"wait_seconds": wait_seconds, "reason": reason},
-                    )
-                    sleep_coro = sleep_fn or asyncio.sleep
-                    await sleep_coro(wait_seconds)
-                    reserved, wait_seconds, reason = self.state_repository.reserve_publish_slot(
-                        message_id, min_interval_seconds=self.scheduler.min_interval_seconds
-                    )
-                    if not reserved:
-                        self.state_repository.upsert_stage(message_id, "publish", "scheduled", reason)
-                        return PipelineExecutionSummary(
-                            message_id=message_id,
-                            status="scheduled",
-                            stages=stage_records,
-                            duration_seconds=round(time.monotonic() - start_time, 3),
-                            error=reason,
-                        )
-                else:
-                    self.logger.info(
-                        "Rate limit reservation conflict; pausing before publishing",
-                        extra={"message_id": message_id, "reason": reason},
-                    )
-                    self.state_repository.upsert_stage(message_id, "publish", "scheduled", reason)
-                    return PipelineExecutionSummary(
-                        message_id=message_id,
-                        status="scheduled",
-                        stages=stage_records,
-                        duration_seconds=round(time.monotonic() - start_time, 3),
-                        error=reason,
-                    )
-
 
         # 7. Stage: Video Render
         ok, _, fail_summary = await self._run_stage(
@@ -356,7 +315,62 @@ class PipelineOrchestrator:
         if not ok:
             return fail_summary  # type: ignore[return-value]
 
-        # 8. Stage: Multi-Platform Publishing
+        # 8. Stage: Multi-Platform Publishing (Atomic Rate-Limit Reservation & Publishing)
+        if (
+            self.scheduler
+            and enforce_scheduler
+            and self.scheduler.enabled
+            and self.scheduler.min_interval_seconds > 0
+        ):
+            # Atomic rate-limit slot reservation immediately before publishing
+            reserved, wait_seconds, reason = self.state_repository.reserve_publish_slot(
+                message_id, min_interval_seconds=self.scheduler.min_interval_seconds
+            )
+            if not reserved:
+                stage_records["scheduler"] = {
+                    "can_post": False,
+                    "wait_seconds": wait_seconds,
+                    "reason": reason,
+                }
+                if wait_for_window:
+                    self.logger.info(
+                        "Rate limit reservation delay required before publishing",
+                        extra={"wait_seconds": wait_seconds, "reason": reason},
+                    )
+                    sleep_coro = sleep_fn or asyncio.sleep
+                    await sleep_coro(wait_seconds)
+                    reserved, wait_seconds, reason = self.state_repository.reserve_publish_slot(
+                        message_id, min_interval_seconds=self.scheduler.min_interval_seconds
+                    )
+                    if not reserved:
+                        self.state_repository.upsert_stage(message_id, "publish", "scheduled", reason)
+                        self.state_repository.release_execution_claim(
+                            message_id, "orchestration", "scheduled", reason
+                        )
+                        return PipelineExecutionSummary(
+                            message_id=message_id,
+                            status="scheduled",
+                            stages=stage_records,
+                            duration_seconds=round(time.monotonic() - start_time, 3),
+                            error=reason,
+                        )
+                else:
+                    self.logger.info(
+                        "Rate limit reservation conflict; pausing before publishing",
+                        extra={"message_id": message_id, "reason": reason},
+                    )
+                    self.state_repository.upsert_stage(message_id, "publish", "scheduled", reason)
+                    self.state_repository.release_execution_claim(
+                        message_id, "orchestration", "scheduled", reason
+                    )
+                    return PipelineExecutionSummary(
+                        message_id=message_id,
+                        status="scheduled",
+                        stages=stage_records,
+                        duration_seconds=round(time.monotonic() - start_time, 3),
+                        error=reason,
+                    )
+
         ok, publish_result, fail_summary = await self._run_stage(
             "publish",
             message_id,

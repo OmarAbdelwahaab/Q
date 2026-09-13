@@ -99,6 +99,7 @@ class PipelineStateRepository:
         else:
             connection = sqlite3.connect(self.database_path, timeout=30.0)
             connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA busy_timeout=30000")
             return connection
 
 
@@ -157,6 +158,7 @@ class PipelineStateRepository:
                     """
                 )
             else:
+                cur.execute("PRAGMA journal_mode=WAL")
                 cur.execute(
                     """
                     CREATE TABLE IF NOT EXISTS pipeline_items (
@@ -364,12 +366,17 @@ class PipelineStateRepository:
         """
         with closing(self._connect()) as conn:
             try:
+                cur = conn.cursor()
                 if self.backend == "sqlite":
                     conn.execute("BEGIN IMMEDIATE")
                 else:
                     conn.execute("BEGIN")
+                    # Acquire transaction-level advisory lock on message_id in PostgreSQL
+                    sql_lock = self._format_sql(
+                        "SELECT pg_advisory_xact_lock(hashtext('claim_execution_' || CAST(? AS text)))"
+                    )
+                    cur.execute(sql_lock, (message_id,))
 
-                cur = conn.cursor()
                 # 1. Check if publish is already completed
                 sql_pub = self._format_sql(
                     "SELECT status FROM pipeline_items WHERE message_id = ? AND stage = ?"
@@ -415,10 +422,30 @@ class PipelineStateRepository:
                 conn.rollback()
                 raise
 
+    def release_execution_claim(
+        self,
+        message_id: int,
+        stage: str = "orchestration",
+        status: str = "scheduled",
+        error: str | None = None,
+    ) -> None:
+        """Release an execution claim by resetting its status (e.g. to 'scheduled' or 'failed')."""
+        self.upsert_stage(message_id, stage, status, error)
+
+    def clear_publish_reservation(
+        self,
+        message_id: int,
+        status: str = "failed",
+        error: str | None = None,
+    ) -> None:
+        """Clear an active publish slot reservation so subsequent messages are unblocked."""
+        self.upsert_stage(message_id, "publish", status, error)
+
     def reserve_publish_slot(
         self,
         message_id: int,
         min_interval_seconds: int = 1800,
+        reservation_timeout_seconds: int = 300,
     ) -> tuple[bool, float, str]:
         """Atomically evaluate rate limits and reserve a publication slot.
 
@@ -428,12 +455,16 @@ class PipelineStateRepository:
         """
         with closing(self._connect()) as conn:
             try:
+                cur = conn.cursor()
                 if self.backend == "sqlite":
                     conn.execute("BEGIN IMMEDIATE")
                 else:
                     conn.execute("BEGIN")
-
-                cur = conn.cursor()
+                    # Acquire transaction-level advisory lock on global publish slot in PostgreSQL
+                    sql_lock = self._format_sql(
+                        "SELECT pg_advisory_xact_lock(hashtext('reserve_publish_slot'))"
+                    )
+                    cur.execute(sql_lock)
 
                 # 1. Check if this message was already published
                 sql_self = self._format_sql(
@@ -450,7 +481,7 @@ class PipelineStateRepository:
                 # 2. Check latest publication or active reservation across other messages
                 sql_latest = self._format_sql(
                     """
-                    SELECT updated_at
+                    SELECT status, updated_at
                     FROM pipeline_items
                     WHERE stage = ? AND status IN (?, ?) AND message_id != ?
                     ORDER BY updated_at DESC
@@ -460,14 +491,23 @@ class PipelineStateRepository:
                 cur.execute(sql_latest, ("publish", "completed", "processing", message_id))
                 row = cur.fetchone()
                 last_dt = None
+                last_status = None
                 if row:
-                    res = row[0] if isinstance(row, (tuple, list)) else row["updated_at"]
+                    last_status = row[0] if isinstance(row, (tuple, list)) else row["status"]
+                    res = row[1] if isinstance(row, (tuple, list)) else row["updated_at"]
                     last_dt = self._parse_datetime(res)
 
                 if last_dt is not None and min_interval_seconds > 0:
                     now_dt = datetime.now(timezone.utc)
                     elapsed = (now_dt - last_dt).total_seconds()
-                    remaining = min_interval_seconds - elapsed
+                    # An active 'processing' reservation expires after reservation_timeout_seconds (default 300s)
+                    # to prevent a dead/crashed worker from blocking the rate limit slot indefinitely.
+                    effective_interval = (
+                        min_interval_seconds
+                        if last_status == "completed"
+                        else min(min_interval_seconds, reservation_timeout_seconds)
+                    )
+                    remaining = effective_interval - elapsed
                     if remaining > 0:
                         conn.commit()
                         return False, remaining, f"Rate limit active: must wait {remaining:.1f}s"
