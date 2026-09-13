@@ -251,6 +251,88 @@ class PipelineStateRepositoryTests(unittest.TestCase):
         result = PipelineStateRepository._row_to_dict(mock_cursor, row_tuple)
         self.assertEqual(result, {"col1": "val1", "col2": "val2"})
 
+    def test_claim_execution_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = PipelineStateRepository(database_path=Path(temp_dir) / "state.db")
+
+            # 1. First claim succeeds
+            claimed, reason = repo.claim_execution(101)
+            self.assertTrue(claimed)
+            self.assertEqual(reason, "claimed")
+            row = repo.fetch_stage(101, "orchestration")
+            self.assertIsNotNone(row)
+            self.assertEqual(row["status"], "processing")
+
+            # 2. Second claim while still processing fails without force
+            claimed2, reason2 = repo.claim_execution(101, force=False)
+            self.assertFalse(claimed2)
+            self.assertEqual(reason2, "active_execution")
+
+            # 3. Second claim with force=True succeeds
+            claimed3, reason3 = repo.claim_execution(101, force=True)
+            self.assertTrue(claimed3)
+            self.assertEqual(reason3, "claimed")
+
+            # 4. If publish stage is completed, claim fails with already_completed
+            repo.upsert_stage(101, "publish", "completed")
+            claimed4, reason4 = repo.claim_execution(101, force=False)
+            self.assertFalse(claimed4)
+            self.assertEqual(reason4, "already_completed")
+
+            # 5. If orchestration stage itself was completed, claim fails
+            repo.upsert_stage(102, "orchestration", "completed")
+            claimed5, reason5 = repo.claim_execution(102, force=False)
+            self.assertFalse(claimed5)
+            self.assertEqual(reason5, "already_completed")
+
+    def test_reserve_publish_slot_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = PipelineStateRepository(database_path=Path(temp_dir) / "state.db")
+
+            # 1. First reservation succeeds
+            reserved, wait_s, reason = repo.reserve_publish_slot(201, min_interval_seconds=1800)
+            self.assertTrue(reserved)
+            self.assertEqual(wait_s, 0.0)
+            self.assertEqual(reason, "reserved")
+            row = repo.fetch_stage(201, "publish")
+            self.assertIsNotNone(row)
+            self.assertEqual(row["status"], "processing")
+
+            # 2. Another message tries to reserve within the 1800s window -> blocked
+            reserved2, wait_s2, reason2 = repo.reserve_publish_slot(202, min_interval_seconds=1800)
+            self.assertFalse(reserved2)
+            self.assertGreater(wait_s2, 0.0)
+            self.assertIn("Rate limit active", reason2)
+
+            # 3. Message 201 completes publication
+            repo.upsert_stage(201, "publish", "completed")
+
+            # 4. Re-reserving for already completed message 201 fails
+            reserved_self, wait_self, reason_self = repo.reserve_publish_slot(201, min_interval_seconds=1800)
+            self.assertFalse(reserved_self)
+            self.assertEqual(reason_self, "already_published")
+
+            # 5. With min_interval_seconds=0, reservation passes
+            reserved_zero, wait_zero, reason_zero = repo.reserve_publish_slot(203, min_interval_seconds=0)
+            self.assertTrue(reserved_zero)
+            self.assertEqual(wait_zero, 0.0)
+
+    def test_connection_pool_and_close(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = PipelineStateRepository(database_path=Path(temp_dir) / "state.db")
+            # Close on SQLite repo is a clean no-op
+            repo.close()
+            self.assertIsNone(repo._pool)
+
+        # When pool is present, close() calls pool.close()
+        repo_pg = PipelineStateRepository.__new__(PipelineStateRepository)
+        repo_pg.backend = "postgres"
+        mock_pool = MagicMock()
+        repo_pg._pool = mock_pool
+        repo_pg.close()
+        mock_pool.close.assert_called_once()
+        self.assertIsNone(repo_pg._pool)
+
 
 # ---------------------------------------------------------------------------
 # 3. PipelineOrchestrator End-to-End Tests
@@ -492,6 +574,43 @@ class PipelineOrchestratorTests(unittest.TestCase):
             self.mock_render.render.assert_awaited_once()
             self.mock_publish.publish.assert_awaited_once()
 
+    def test_orchestrator_skips_when_active_execution_detected(self) -> None:
+        # Simulate an ongoing execution by another worker
+        self.state_repo.upsert_stage(309, "orchestration", "processing")
+
+        summary = asyncio.run(self.orchestrator.run(message_id=309))
+
+        self.assertEqual(summary.status, "skipped_active_execution")
+        self.mock_audio.extract.assert_not_called()
+        self.mock_render.render.assert_not_called()
+        self.mock_publish.publish.assert_not_called()
+
+    def test_orchestrator_rate_limit_reservation_halts_when_locked(self) -> None:
+        # Scheduler enabled with open window but another message already reserved the rate-limit slot
+        open_scheduler = PostingWindowScheduler(
+            enabled=True, start_hour=0, end_hour=23, timezone_name="UTC", min_interval_seconds=1800
+        )
+        self.orchestrator.scheduler = open_scheduler
+
+        # Another message reserved the slot
+        self.state_repo.reserve_publish_slot(401, min_interval_seconds=1800)
+
+        # Message 402 stages 1-5 pass
+        self.mock_audio.extract = AsyncMock(return_value=AudioExtractionResult(402, "completed", None, None))
+        self.mock_recognition.recognize = AsyncMock(return_value=RecognitionResult(402, "completed", None, None))
+        self.mock_alignment.align = AsyncMock(return_value=AlignmentResult(402, "completed", None, 1.0))
+        self.mock_qa_gate.evaluate = AsyncMock(return_value=QAGateResult(402, "approved", True))
+
+        summary = asyncio.run(
+            self.orchestrator.run(message_id=402, enforce_scheduler=True, wait_for_window=False)
+        )
+
+        self.assertEqual(summary.status, "scheduled")
+        self.assertIn("Rate limit active", summary.error or "")
+        self.mock_render.render.assert_not_called()
+        self.mock_publish.publish.assert_not_called()
+
+
 
 # ---------------------------------------------------------------------------
 # 4. n8n Workflow JSON Structure & Integrity Tests
@@ -585,11 +704,12 @@ class N8nWorkflowIntegrityTests(unittest.TestCase):
 
 class OrchestrationCLITests(unittest.TestCase):
     def test_cli_argument_parsing(self) -> None:
-        args = parse_args(["505", "--draft", "--skip-scheduler", "--wait-for-window", "--json"])
+        args = parse_args(["505", "--draft", "--skip-scheduler", "--wait-for-window", "--force", "--json"])
         self.assertEqual(args.message_id, 505)
         self.assertTrue(args.draft)
         self.assertTrue(args.skip_scheduler)
         self.assertTrue(args.wait_for_window)
+        self.assertTrue(args.force)
         self.assertTrue(args.json)
 
     def test_orchestration_settings_from_env(self) -> None:
@@ -618,6 +738,20 @@ class OrchestrationCLITests(unittest.TestCase):
             # Completed -> 0
             mock_orch.run = AsyncMock(
                 return_value=PipelineExecutionSummary(601, "completed")
+            )
+            code = asyncio.run(cli_main(["601"]))
+            self.assertEqual(code, 0)
+
+            # Skipped active execution -> 0
+            mock_orch.run = AsyncMock(
+                return_value=PipelineExecutionSummary(601, "skipped_active_execution")
+            )
+            code = asyncio.run(cli_main(["601"]))
+            self.assertEqual(code, 0)
+
+            # Skipped already published -> 0
+            mock_orch.run = AsyncMock(
+                return_value=PipelineExecutionSummary(601, "skipped_already_published")
             )
             code = asyncio.run(cli_main(["601"]))
             self.assertEqual(code, 0)

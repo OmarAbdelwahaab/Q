@@ -44,17 +44,22 @@ Phase 8 validates the end-to-end workflow orchestration, time-of-day posting-win
 | **State Store** | SQL parameter translation | `PipelineStateRepository` | Preserves `?` for SQLite and translates to `%s` for PostgreSQL |
 | **State Store** | PostgreSQL missing driver | `PipelineStateRepository` | Raises clear `ImportError` when neither psycopg nor psycopg2 is available |
 | **State Store** | Row to dict conversion helper | `PipelineStateRepository` | Safely converts None, dicts, Row objects, and tuple rows |
+| **State Store** | Claim execution atomic token | `PipelineStateRepository` | Grants claim on fresh items; rejects concurrent runs (`active_execution`) & completed items; `--force` overrides |
+| **State Store** | Reserve publish slot atomic token | `PipelineStateRepository` | Reserves slot atomically; blocks concurrent worker reservations inside rate-limit window |
+| **State Store** | Connection pool lifecycle & close | `PipelineStateRepository` | Safe pool shutdown on `close()`; no-op on SQLite |
 | **Orchestrator** | Happy path execution | `PipelineOrchestrator` | Runs audio $\to$ recognition $\to$ alignment $\to$ QA gate $\to$ render $\to$ publish |
 | **Orchestrator** | Idempotency enforcement | `PipelineOrchestrator` | Skips already published message without executing any stage |
+| **Orchestrator** | Active execution lock skip | `PipelineOrchestrator` | Detects concurrent worker claim and safely skips with `skipped_active_execution` (exit 0) |
 | **Orchestrator** | QA Gate rejection halt | `PipelineOrchestrator` | Rejection stops pipeline immediately; render and publish are never called |
 | **Orchestrator** | Stage failure halt & alert | `PipelineOrchestrator` | Stage failure stops downstream execution, alerts, and returns failed status |
 | **Orchestrator** | Scheduler pauses when closed | `PipelineOrchestrator` | Outside window pauses before render/publish, records `scheduled` state |
 | **Orchestrator** | Wait for window delay | `PipelineOrchestrator` | Waits duration via sleep callback then completes render and publish |
+| **Orchestrator** | Rate limit slot contention halt | `PipelineOrchestrator` | When slot is reserved by another item and not waiting, halts with `scheduled` state |
 | **n8n Workflow** | Main workflow structure | `workflow.json` | Valid JSON, contains all 11 required nodes with correct connections and error link |
 | **n8n Workflow** | Error workflow structure | `error_workflow.json` | Valid JSON, contains Error Trigger $\to$ Format $\to$ Update State $\to$ Alert |
-| **CLI & Config** | Argument parsing | `pipeline.orchestration.app` | Parses `--draft`, `--skip-scheduler`, `--wait-for-window`, `--json` |
+| **CLI & Config** | Argument parsing | `pipeline.orchestration.app` | Parses `--draft`, `--skip-scheduler`, `--wait-for-window`, `--force`, `--json` |
 | **CLI & Config** | Environment loading | `OrchestrationSettings` | Parses posting window hours, timezone, and rate limit intervals |
-| **CLI & Config** | Exit code mapping | `pipeline.orchestration.app` | Returns 0 on success/skip, 2 on review queue hold, 1 on failure |
+| **CLI & Config** | Exit code mapping | `pipeline.orchestration.app` | Returns 0 on success/skip/scheduled, 2 on review queue hold, 1 on failure |
 | **End-to-End** | Dry run & idempotency | Full Pipeline | Renders real 1080x1920 MP4, publishes in draft, records state, verifies skip |
 
 ---

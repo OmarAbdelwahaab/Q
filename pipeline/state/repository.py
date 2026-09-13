@@ -9,6 +9,29 @@ from pathlib import Path
 from typing import Any
 
 
+class _PooledConnectionWrapper:
+    """Wrapper ensuring connections retrieved from a pool are returned on close."""
+
+    def __init__(self, pool: Any, connection: Any) -> None:
+        self._pool = pool
+        self._connection = connection
+
+    def close(self) -> None:
+        if hasattr(self._pool, "putconn"):
+            self._pool.putconn(self._connection)
+        elif hasattr(self._connection, "close"):
+            self._connection.close()
+
+    def __enter__(self) -> Any:
+        return self._connection.__enter__()
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> Any:
+        return self._connection.__exit__(exc_type, exc_val, exc_tb)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._connection, name)
+
+
 class PipelineStateRepository:
     """Persist stage status rows in SQLite (default/local) or PostgreSQL (multi-container)."""
 
@@ -18,9 +41,11 @@ class PipelineStateRepository:
         database_url: str | None = None,
     ) -> None:
         self.database_url = database_url
+        self._pool: Any = None
         if database_url:
             self.backend = "postgres"
             self.database_path = None
+            self._init_postgres_pool()
         else:
             self.backend = "sqlite"
             self.database_path = Path(database_path or "pipeline/state/pipeline.db")
@@ -29,8 +54,35 @@ class PipelineStateRepository:
         self._placeholder = "%s" if self.backend == "postgres" else "?"
         self._initialize()
 
+    def _init_postgres_pool(self) -> None:
+        """Initialize PostgreSQL connection pool if pool drivers are installed."""
+        try:
+            from psycopg_pool import ConnectionPool
+            self._pool = ConnectionPool(self.database_url, min_size=1, max_size=10, open=True)
+            return
+        except ImportError:
+            pass
+        try:
+            from psycopg2.pool import ThreadedConnectionPool
+            self._pool = ThreadedConnectionPool(minconn=1, maxconn=10, dsn=self.database_url)
+            return
+        except ImportError:
+            pass
+        self._pool = None
+
+    def close(self) -> None:
+        """Release connection pool resources if open."""
+        if self._pool is not None and hasattr(self._pool, "close"):
+            self._pool.close()
+            self._pool = None
+
     def _connect(self) -> Any:
         if self.backend == "postgres":
+            if self._pool is not None:
+                if hasattr(self._pool, "connection"):
+                    return self._pool.connection()
+                if hasattr(self._pool, "getconn"):
+                    return _PooledConnectionWrapper(self._pool, self._pool.getconn())
             try:
                 import psycopg  # psycopg 3
                 return psycopg.connect(self.database_url)
@@ -45,9 +97,10 @@ class PipelineStateRepository:
                     "Install 'psycopg[binary]' to connect to PostgreSQL."
                 ) from exc
         else:
-            connection = sqlite3.connect(self.database_path)
+            connection = sqlite3.connect(self.database_path, timeout=30.0)
             connection.row_factory = sqlite3.Row
             return connection
+
 
     def _format_sql(self, query: str) -> str:
         """Translate SQLite '?' parameter markers to PostgreSQL '%s' when needed."""
@@ -240,6 +293,26 @@ class PipelineStateRepository:
             row = cur.fetchone()
             return self._row_to_dict(cur, row)
 
+    @staticmethod
+    def _parse_datetime(res: Any) -> datetime | None:
+        """Helper to convert database timestamp values to timezone-aware UTC datetimes."""
+        if res is None:
+            return None
+        if isinstance(res, datetime):
+            return res if res.tzinfo else res.replace(tzinfo=timezone.utc)
+        if isinstance(res, str):
+            try:
+                dt = datetime.fromisoformat(res)
+                return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+            except ValueError:
+                try:
+                    # SQLite CURRENT_TIMESTAMP format: "YYYY-MM-DD HH:MM:SS"
+                    dt = datetime.strptime(res, "%Y-%m-%d %H:%M:%S")
+                    return dt.replace(tzinfo=timezone.utc)
+                except ValueError:
+                    return None
+        return None
+
     def fetch_latest_published_timestamp(self) -> datetime | None:
         """Return the timestamp of the most recently published video item, if any."""
         sql = self._format_sql(
@@ -258,17 +331,7 @@ class PipelineStateRepository:
             if not row:
                 return None
             res = row[0] if isinstance(row, (tuple, list)) else row["updated_at"]
-            if isinstance(res, datetime):
-                return res if res.tzinfo else res.replace(tzinfo=timezone.utc)
-            if isinstance(res, str):
-                try:
-                    dt = datetime.fromisoformat(res)
-                    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-                except ValueError:
-                    # SQLite CURRENT_TIMESTAMP format: "YYYY-MM-DD HH:MM:SS"
-                    dt = datetime.strptime(res, "%Y-%m-%d %H:%M:%S")
-                    return dt.replace(tzinfo=timezone.utc)
-            return None
+            return self._parse_datetime(res)
 
     def fetch_items_by_status(self, stage: str, status: str) -> list[dict[str, Any]]:
         """Return items matching a given stage and status (e.g. for review queue or retry monitoring)."""
@@ -285,4 +348,146 @@ class PipelineStateRepository:
             cur.execute(sql, (stage, status))
             rows = cur.fetchall()
             return [d for r in rows if (d := self._row_to_dict(cur, r)) is not None]
+
+    def claim_execution(
+        self,
+        message_id: int,
+        stage: str = "orchestration",
+        force: bool = False,
+    ) -> tuple[bool, str]:
+        """Atomically claim pipeline execution token for message_id to prevent concurrent races.
+
+        Returns (claimed, reason):
+          - (True, "claimed") if execution token was successfully acquired
+          - (False, "already_completed") if the item has already completed publishing
+          - (False, "active_execution") if another worker is currently processing this message
+        """
+        with closing(self._connect()) as conn:
+            try:
+                if self.backend == "sqlite":
+                    conn.execute("BEGIN IMMEDIATE")
+                else:
+                    conn.execute("BEGIN")
+
+                cur = conn.cursor()
+                # 1. Check if publish is already completed
+                sql_pub = self._format_sql(
+                    "SELECT status FROM pipeline_items WHERE message_id = ? AND stage = ?"
+                )
+                cur.execute(sql_pub, (message_id, "publish"))
+                pub_row = cur.fetchone()
+                if pub_row:
+                    status = pub_row[0] if isinstance(pub_row, (tuple, list)) else pub_row["status"]
+                    if status == "completed":
+                        conn.commit()
+                        return False, "already_completed"
+
+                # 2. Check existing claim stage status
+                sql_stage = self._format_sql(
+                    "SELECT status FROM pipeline_items WHERE message_id = ? AND stage = ?"
+                )
+                cur.execute(sql_stage, (message_id, stage))
+                stage_row = cur.fetchone()
+                if stage_row:
+                    status = stage_row[0] if isinstance(stage_row, (tuple, list)) else stage_row["status"]
+                    if status == "completed":
+                        conn.commit()
+                        return False, "already_completed"
+                    if status == "processing" and not force:
+                        conn.commit()
+                        return False, "active_execution"
+
+                # 3. Atomically upsert claim status to 'processing'
+                sql_claim = self._format_sql(
+                    """
+                    INSERT INTO pipeline_items (message_id, stage, status, error)
+                    VALUES (?, ?, 'processing', NULL)
+                    ON CONFLICT (message_id, stage) DO UPDATE SET
+                        status = 'processing',
+                        error = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    """
+                )
+                cur.execute(sql_claim, (message_id, stage))
+                conn.commit()
+                return True, "claimed"
+            except Exception:
+                conn.rollback()
+                raise
+
+    def reserve_publish_slot(
+        self,
+        message_id: int,
+        min_interval_seconds: int = 1800,
+    ) -> tuple[bool, float, str]:
+        """Atomically evaluate rate limits and reserve a publication slot.
+
+        Returns (reserved, wait_seconds, reason):
+          - (True, 0.0, "reserved") if slot was successfully reserved
+          - (False, remaining_seconds, reason) if locked by another publication or active reservation
+        """
+        with closing(self._connect()) as conn:
+            try:
+                if self.backend == "sqlite":
+                    conn.execute("BEGIN IMMEDIATE")
+                else:
+                    conn.execute("BEGIN")
+
+                cur = conn.cursor()
+
+                # 1. Check if this message was already published
+                sql_self = self._format_sql(
+                    "SELECT status FROM pipeline_items WHERE message_id = ? AND stage = ?"
+                )
+                cur.execute(sql_self, (message_id, "publish"))
+                self_row = cur.fetchone()
+                if self_row:
+                    s = self_row[0] if isinstance(self_row, (tuple, list)) else self_row["status"]
+                    if s == "completed":
+                        conn.commit()
+                        return False, 0.0, "already_published"
+
+                # 2. Check latest publication or active reservation across other messages
+                sql_latest = self._format_sql(
+                    """
+                    SELECT updated_at
+                    FROM pipeline_items
+                    WHERE stage = ? AND status IN (?, ?) AND message_id != ?
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """
+                )
+                cur.execute(sql_latest, ("publish", "completed", "processing", message_id))
+                row = cur.fetchone()
+                last_dt = None
+                if row:
+                    res = row[0] if isinstance(row, (tuple, list)) else row["updated_at"]
+                    last_dt = self._parse_datetime(res)
+
+                if last_dt is not None and min_interval_seconds > 0:
+                    now_dt = datetime.now(timezone.utc)
+                    elapsed = (now_dt - last_dt).total_seconds()
+                    remaining = min_interval_seconds - elapsed
+                    if remaining > 0:
+                        conn.commit()
+                        return False, remaining, f"Rate limit active: must wait {remaining:.1f}s"
+
+                # 3. Reserve slot atomically by marking publish stage 'processing'
+                sql_reserve = self._format_sql(
+                    """
+                    INSERT INTO pipeline_items (message_id, stage, status, error)
+                    VALUES (?, ?, 'processing', NULL)
+                    ON CONFLICT (message_id, stage) DO UPDATE SET
+                        status = 'processing',
+                        error = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    """
+                )
+                cur.execute(sql_reserve, (message_id, "publish"))
+                conn.commit()
+                return True, 0.0, "reserved"
+            except Exception:
+                conn.rollback()
+                raise
+
 

@@ -1,7 +1,7 @@
 # Phase 8 Completion Report — Workflow Orchestration, Scheduling & Dual-Tier State
 
-**Status:** Implementation complete; all 101 unit, integration, dry-run, and CLI tests passing cleanly under both `python -m unittest discover` and `pytest -v`.  
-**Date:** 2026-09-12
+**Status:** Implementation complete; all 106 unit, integration, dry-run, concurrency, and CLI tests passing cleanly under both `python -m unittest discover` and `pytest -v`.  
+**Date:** 2026-09-13
 
 ---
 
@@ -9,15 +9,32 @@
 
 - **Complete 7-Stage Pipeline Orchestrator (`pipeline/orchestration/runner.py`)**:
   - Implemented `PipelineOrchestrator` coordinating the full lifecycle for a given video message:
-    1. Idempotency check (`skipped_already_published` if already completed and artifact present).
+    1. Idempotency check & atomic claim (`claim_execution`).
     2. Audio extraction (`AudioExtractionService` $\to$ 16kHz mono WAV).
     3. Verse recognition (`RecognitionService` $\to$ canonical Quran match JSON).
     4. Forced alignment (`AlignmentService` $\to$ word timestamps).
     5. QA Gate verification (`QAGateService`). If rejected/held, execution halts immediately, state is recorded as `rejected`, alerts are dispatched, and render/publish are **never executed**.
-    6. Scheduler evaluation (`PostingWindowScheduler` checking time-of-day window and rate limits).
+    6. Scheduler evaluation & atomic rate-limit slot reservation (`reserve_publish_slot`).
     7. Video render (`RenderService` composing background, HarfBuzz RTL karaoke ASS subtitles, audio, and branding into 1080x1920 MP4).
     8. Multi-platform publish (`PublishService` uploading to public URL and posting via Ayrshare in live or draft mode).
   - Clean error boundaries: any unhandled exception in any stage marks state as `failed`, alerts via `AlertService`, and halts progression for that item without crashing other jobs.
+  - **Refactored `run()` boilerplate**: Extracted `_run_stage` consolidating error handling, logging, state store upsert, and alert dispatch, eliminating ~250 lines of duplicate code across all 6 stages.
+  - **Cleaned dead imports**: Removed unused `datetime, timezone` imports from `runner.py`.
+
+- **Concurrency & Race-Condition Resolutions (`pipeline/state/repository.py`, `pipeline/orchestration/runner.py`)**:
+  - **Atomic Idempotency Claim (`claim_execution`)**:
+    - Guarded with transactional locks (`BEGIN IMMEDIATE` in SQLite, `BEGIN` in PostgreSQL).
+    - Concurrent runs for the same `message_id` return `(False, "active_execution")`, causing the worker to exit cleanly with status `skipped_active_execution` (exit code 0) rather than executing parallel colliding passes.
+    - Added `--force` CLI flag allowing operator override for intentional manual re-runs.
+  - **Atomic Rate-Limit Reservation (`reserve_publish_slot`)**:
+    - Evaluates the rate-limit window atomically against both completed posts and active reservations from other concurrent workers.
+    - Prevents near-simultaneous triggers from obtaining green lights in the same rate-limit window.
+
+- **Connection Pooling (`pipeline/state/repository.py`)**:
+  - Added connection pool management supporting `psycopg_pool.ConnectionPool` (psycopg v3) and `psycopg2.pool.ThreadedConnectionPool` (psycopg2).
+  - Encapsulated via `_PooledConnectionWrapper` to automatically return connections to the pool upon context manager exit.
+  - Transparent fallback with zero dependencies when running local SQLite tests.
+  - Added repository `close()` lifecycle method.
 
 - **Posting Window & Rate Limit Scheduler (`pipeline/orchestration/scheduler.py`)**:
   - Implemented `PostingWindowScheduler`:
@@ -30,10 +47,7 @@
   - SQLite default for local CLI development and hermetic automated tests (`STATE_DB_PATH`).
   - PostgreSQL support (`STATE_DATABASE_URL`) for multi-container orchestration (n8n worker containers).
   - Dynamic parameter placeholder translation (`?` $\leftrightarrow$ `%s`) preserving identical query templates and schema parity across both backends (`pipeline_items`, `pipeline_messages`).
-  - Added helper query methods for orchestration and monitoring:
-    - `fetch_all_stages(message_id)`
-    - `fetch_latest_published_timestamp()`
-    - `fetch_items_by_status(stage, status)`
+  - Helper query methods: `fetch_all_stages()`, `fetch_latest_published_timestamp()`, `fetch_items_by_status()`.
 
 - **Production n8n Workflows (`pipeline/orchestration/`)**:
   - `pipeline/orchestration/workflow.json`:
@@ -47,8 +61,8 @@
     - Dispatches high-priority alert to monitoring webhook/Telegram.
 
 - **CLI Application & Settings (`pipeline/orchestration/app.py`, `pipeline/config.py`)**:
-  - CLI supports: `message_id`, `--source`, `--draft`, `--skip-scheduler`, `--wait-for-window`, `--json`.
-  - Maps exit codes: 0 for success/skip/scheduled, 2 for QA review queue hold, 1 for failure.
+  - CLI supports: `message_id`, `--source`, `--draft`, `--skip-scheduler`, `--wait-for-window`, `--force`, `--json`.
+  - Maps exit codes: 0 for success/skip/scheduled/active-skip, 2 for QA review queue hold, 1 for failure.
   - Added `OrchestrationSettings` dataclass reading `POSTING_WINDOW_*` and `RATE_LIMIT_*` settings from environment, reflected in `.env.example`.
 
 - **End-to-End Dry Run & Idempotency Integration Test**:
@@ -63,7 +77,7 @@
 ### Standard Library Discovery (`python -m unittest discover -s pipeline/tests -v`)
 Ran with zero external test dependencies:
 ```text
-Ran 101 tests in 3.998s
+Ran 106 tests in 4.200s
 
 OK
 ```
@@ -76,29 +90,33 @@ rootdir: C:\Users\COMPUMARTS\Desktop\Q
 configfile: pyproject.toml
 plugins: asyncio-0.25.3
 asyncio: mode=Mode.AUTO
-collected 101 items
+collected 106 items
 
 pipeline/tests/test_alignment.py::AlignmentTests::test_align_calculates_coverage_and_persists_artifact PASSED [  0%]
 ...
-pipeline/tests/test_orchestration.py::PipelineDryRunIntegrationTests::test_end_to_end_dry_run_with_draft_publishing_and_idempotency PASSED [ 39%]
+pipeline/tests/test_orchestration.py::PipelineStateRepositoryTests::test_claim_execution_lifecycle PASSED [ 23%]
+pipeline/tests/test_orchestration.py::PipelineStateRepositoryTests::test_reserve_publish_slot_lifecycle PASSED [ 24%]
+pipeline/tests/test_orchestration.py::PipelineOrchestratorTests::test_orchestrator_skips_when_active_execution_detected PASSED [ 34%]
+pipeline/tests/test_orchestration.py::PipelineOrchestratorTests::test_orchestrator_wait_for_window_sleeps_and_proceeds PASSED [ 36%]
+pipeline/tests/test_orchestration.py::PipelineDryRunIntegrationTests::test_end_to_end_dry_run_with_draft_publishing_and_idempotency PASSED [ 42%]
 ...
 pipeline/tests/test_render.py::TestRenderRealFFmpegIntegration::test_real_ffmpeg_end_to_end_render PASSED [100%]
 
-============================= 101 passed in 4.75s =============================
+============================= 106 passed in 4.60s =============================
 ```
 
 ---
 
 ## 3. Artifact Checklist
-- [x] `pipeline/state/repository.py` (Dual-tier SQLite & PostgreSQL backend per ADR 001)
+- [x] `pipeline/state/repository.py` (Dual-tier SQLite & PostgreSQL backend, connection pooling, `claim_execution`, `reserve_publish_slot`)
 - [x] `pipeline/orchestration/scheduler.py` (`PostingWindowScheduler`)
-- [x] `pipeline/orchestration/runner.py` (`PipelineOrchestrator`)
-- [x] `pipeline/orchestration/app.py` (CLI entrypoint)
+- [x] `pipeline/orchestration/runner.py` (`PipelineOrchestrator` with deduplicated `_run_stage` and atomic locks)
+- [x] `pipeline/orchestration/app.py` (CLI entrypoint with `--force`)
 - [x] `pipeline/orchestration/__init__.py`
 - [x] `pipeline/orchestration/workflow.json` (Main n8n workflow)
 - [x] `pipeline/orchestration/error_workflow.json` (Global error n8n workflow)
 - [x] `pipeline/config.py` (`OrchestrationSettings`)
 - [x] `.env.example` (Updated with Phase 8 scheduling variables)
-- [x] `pipeline/tests/test_orchestration.py` (25 automated unit & integration tests)
+- [x] `pipeline/tests/test_orchestration.py` (30 automated unit & integration tests)
 - [x] `PHASE8_TEST_PLAN.md`
 - [x] `PHASE8_COMPLETION_REPORT.md`

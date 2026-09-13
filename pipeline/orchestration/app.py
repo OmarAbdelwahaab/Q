@@ -76,6 +76,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Wait asynchronously until posting window opens if currently closed",
     )
     parser.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="Force execution even if an active claim or previous state exists",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         default=False,
@@ -264,6 +270,7 @@ async def main(argv: list[str] | None = None) -> int:
         draft=args.draft,
         enforce_scheduler=not args.skip_scheduler,
         wait_for_window=args.wait_for_window,
+        force=args.force,
     )
 
     if args.json:
@@ -291,7 +298,12 @@ async def main(argv: list[str] | None = None) -> int:
             },
         )
 
-    if summary.status in ("completed", "skipped_already_published", "scheduled"):
+    if summary.status in (
+        "completed",
+        "skipped_already_published",
+        "skipped_active_execution",
+        "scheduled",
+    ):
         return 0
     elif summary.status == "held_for_review":
         return 2
