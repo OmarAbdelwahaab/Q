@@ -58,7 +58,9 @@
 
 - **Production n8n Workflows (`pipeline/orchestration/`)**:
   - `pipeline/orchestration/workflow.json`:
-    - Full n8n workflow export connecting Telegram trigger $\to$ Ingest $\to$ Audio $\to$ Recognition $\to$ Alignment $\to$ QA Gate $\to$ IF Approved $\to$ Scheduler $\to$ Render $\to$ Publish.
+    - Full n8n workflow export connecting Telegram trigger $\to$ Ingest $\to$ Audio $\to$ Recognition $\to$ Alignment $\to$ QA Gate $\to$ IF Approved $\to$ Posting Window Check $\to$ IF Allowed $\to$ Render $\to$ Publish.
+    - All downstream nodes use explicit named trigger node reference `{{$('Telegram Video Trigger').item.json.message.message_id}}` rather than the prior `$json["message"]["message_id"]` expression.
+    - `Posting Window & Rate Limit Check` one-liner explicitly returns exit code (`sys.exit(0 if d.can_post else 1)`), feeding into `Check Posting Window Allowed` IF node gating Render/Publish execution.
     - False branch of QA Gate routes directly to `Alert QA Review Queue` HTTP/Telegram notification.
     - Configured with `settings.errorWorkflow = "Quran Pipeline Error Handler"`.
   - `pipeline/orchestration/error_workflow.json`:
@@ -68,6 +70,7 @@
     - Dispatches high-priority alert to monitoring webhook/Telegram.
 
 - **CLI Application & Settings (`pipeline/orchestration/app.py`, `pipeline/config.py`)**:
+  - Factory `build_orchestrator()` kwarg drift fixed: `CtcForcedAligner(binary=..., model=...)`, `CaptionTemplater(default_template=...)`, and `MultiPlatformPublishClient(api_base_url=...)`.
   - CLI supports: `message_id`, `--source`, `--draft`, `--skip-scheduler`, `--wait-for-window`, `--force`, `--json`.
   - Maps exit codes: 0 for success/skip/scheduled/active-skip, 2 for QA review queue hold, 1 for failure.
   - Added `OrchestrationSettings` dataclass reading `POSTING_WINDOW_*` and `RATE_LIMIT_*` settings from environment, reflected in `.env.example`.
@@ -84,7 +87,7 @@
 ### Standard Library Discovery (`python -m unittest discover -s pipeline/tests -v`)
 Ran with zero external test dependencies:
 ```text
-Ran 111 tests in 5.441s
+Ran 112 tests in 6.396s
 
 OK
 ```
@@ -97,7 +100,7 @@ rootdir: C:\Users\COMPUMARTS\Desktop\Q
 configfile: pyproject.toml
 plugins: asyncio-0.25.3
 asyncio: mode=Mode.AUTO
-collected 111 items
+collected 112 items
 
 pipeline/tests/test_alignment.py::AlignmentTests::test_align_calculates_coverage_and_persists_artifact PASSED [  0%]
 ...
@@ -106,11 +109,13 @@ pipeline/tests/test_orchestration.py::PipelineStateRepositoryTests::test_concurr
 pipeline/tests/test_orchestration.py::PipelineStateRepositoryTests::test_postgres_advisory_lock_queries PASSED [ 23%]
 pipeline/tests/test_orchestration.py::PipelineOrchestratorTests::test_scheduled_outcome_retry_does_not_deadlock PASSED [ 39%]
 pipeline/tests/test_orchestration.py::PipelineOrchestratorTests::test_downstream_render_failure_does_not_dangle_publish_reservation PASSED [ 40%]
+pipeline/tests/test_orchestration.py::N8nWorkflowIntegrityTests::test_main_workflow_json_structure_and_nodes PASSED [ 41%]
+pipeline/tests/test_orchestration.py::OrchestrationCLITests::test_build_orchestrator_real_instantiation PASSED [ 41%]
 pipeline/tests/test_orchestration.py::PipelineDryRunIntegrationTests::test_end_to_end_dry_run_with_draft_publishing_and_idempotency PASSED [ 45%]
 ...
 pipeline/tests/test_render.py::TestRenderRealFFmpegIntegration::test_real_ffmpeg_end_to_end_render PASSED [100%]
 
-============================= 111 passed in 6.70s =============================
+============================= 112 passed in 6.48s =============================
 ```
 
 ---
@@ -119,12 +124,12 @@ pipeline/tests/test_render.py::TestRenderRealFFmpegIntegration::test_real_ffmpeg
 - [x] `pipeline/state/repository.py` (Dual-tier SQLite & PostgreSQL backend, connection pooling, `claim_execution`, `reserve_publish_slot`, `release_execution_claim`, `clear_publish_reservation`, PostgreSQL advisory transaction locks)
 - [x] `pipeline/orchestration/scheduler.py` (`PostingWindowScheduler`)
 - [x] `pipeline/orchestration/runner.py` (`PipelineOrchestrator` with deduplicated `_run_stage`, non-deadlocking scheduled deferral, and immediate pre-publish rate-limit reservation)
-- [x] `pipeline/orchestration/app.py` (CLI entrypoint with `--force`)
+- [x] `pipeline/orchestration/app.py` (Factory `build_orchestrator()` with corrected kwargs, CLI entrypoint with `--force`)
 - [x] `pipeline/orchestration/__init__.py`
-- [x] `pipeline/orchestration/workflow.json` (Main n8n workflow)
+- [x] `pipeline/orchestration/workflow.json` (Main n8n workflow with named trigger node refs and `Check Posting Window Allowed` IF gate)
 - [x] `pipeline/orchestration/error_workflow.json` (Global error n8n workflow)
 - [x] `pipeline/config.py` (`OrchestrationSettings`)
 - [x] `.env.example` (Updated with Phase 8 scheduling variables)
-- [x] `pipeline/tests/test_orchestration.py` (35 automated unit, multi-threaded concurrent, and integration tests)
+- [x] `pipeline/tests/test_orchestration.py` (36 automated unit, multi-threaded concurrent, factory, and integration tests)
 - [x] `PHASE8_TEST_PLAN.md`
 - [x] `PHASE8_COMPLETION_REPORT.md`

@@ -60,11 +60,12 @@ Phase 8 validates the end-to-end workflow orchestration, time-of-day posting-win
 | **Orchestrator** | Scheduler pauses when closed | `PipelineOrchestrator` | Outside window pauses before render/publish, records `scheduled` state |
 | **Orchestrator** | Wait for window delay | `PipelineOrchestrator` | Waits duration via sleep callback then completes render and publish |
 | **Orchestrator** | Rate limit slot contention halt | `PipelineOrchestrator` | When slot is reserved by another item and not waiting, halts with `scheduled` state |
-| **n8n Workflow** | Main workflow structure | `workflow.json` | Valid JSON, contains all 11 required nodes with correct connections and error link |
+| **n8n Workflow** | Main workflow structure | `workflow.json` | Valid JSON, contains all 12 required nodes, `Check Posting Window Allowed` IF gate, named trigger node references, and error link |
 | **n8n Workflow** | Error workflow structure | `error_workflow.json` | Valid JSON, contains Error Trigger $\to$ Format $\to$ Update State $\to$ Alert |
 | **CLI & Config** | Argument parsing | `pipeline.orchestration.app` | Parses `--draft`, `--skip-scheduler`, `--wait-for-window`, `--force`, `--json` |
 | **CLI & Config** | Environment loading | `OrchestrationSettings` | Parses posting window hours, timezone, and rate limit intervals |
 | **CLI & Config** | Exit code mapping | `pipeline.orchestration.app` | Returns 0 on success/skip/scheduled, 2 on review queue hold, 1 on failure |
+| **CLI & Config** | Real factory instantiation | `pipeline.orchestration.app` | Unmocked `build_orchestrator()` constructs cleanly with stub and production publish clients |
 | **End-to-End** | Dry run & idempotency | Full Pipeline | Renders real 1080x1920 MP4, publishes in draft, records state, verifies skip |
 
 ---

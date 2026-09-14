@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import json
+import os
 import tempfile
 import threading
 import unittest
@@ -805,6 +806,7 @@ class N8nWorkflowIntegrityTests(unittest.TestCase):
             "QA Gate Verification",
             "Check QA Gate Approved",
             "Posting Window & Rate Limit Check",
+            "Check Posting Window Allowed",
             "Render 1080x1920 Video",
             "Multi-Platform Publish",
             "Alert QA Review Queue",
@@ -828,6 +830,47 @@ class N8nWorkflowIntegrityTests(unittest.TestCase):
         self.assertEqual(len(if_outputs), 2)
         self.assertEqual(if_outputs[0][0]["node"], "Posting Window & Rate Limit Check")
         self.assertEqual(if_outputs[1][0]["node"], "Alert QA Review Queue")
+
+        # Posting window check connects to Check Posting Window Allowed IF node
+        self.assertEqual(
+            connections["Posting Window & Rate Limit Check"]["main"][0][0]["node"],
+            "Check Posting Window Allowed",
+        )
+        # Check Posting Window Allowed true branch (output 0) connects to Render
+        self.assertEqual(
+            connections["Check Posting Window Allowed"]["main"][0][0]["node"],
+            "Render 1080x1920 Video",
+        )
+        self.assertEqual(
+            connections["Render 1080x1920 Video"]["main"][0][0]["node"],
+            "Multi-Platform Publish",
+        )
+
+        # Verify downstream nodes use explicit named trigger node reference instead of broken $json
+        downstream_command_nodes = [
+            "Extract Audio WAV",
+            "Recognize Quran Verses",
+            "CTC Forced Alignment",
+            "QA Gate Verification",
+            "Render 1080x1920 Video",
+            "Multi-Platform Publish",
+        ]
+        for node_name in downstream_command_nodes:
+            cmd = nodes[node_name]["parameters"]["command"]
+            self.assertIn(
+                "{{$('Telegram Video Trigger').item.json.message.message_id}}",
+                cmd,
+                f"Node '{node_name}' must use named trigger reference for message_id",
+            )
+            self.assertNotIn(
+                '{{$json["message"]["message_id"]}}',
+                cmd,
+                f"Node '{node_name}' should not use $json['message']['message_id']",
+            )
+
+        # Verify posting window check signals exit code for IF gating
+        post_window_cmd = nodes["Posting Window & Rate Limit Check"]["parameters"]["command"]
+        self.assertIn("sys.exit(0 if d.can_post else 1)", post_window_cmd)
 
         # Verify errorWorkflow linkage
         self.assertEqual(
@@ -936,6 +979,62 @@ class OrchestrationCLITests(unittest.TestCase):
             )
             code = asyncio.run(cli_main(["603"]))
             self.assertEqual(code, 1)
+
+    def test_build_orchestrator_real_instantiation(self) -> None:
+        """Verify unmocked build_orchestrator() constructs cleanly without constructor kwarg errors."""
+        import tempfile
+        from pipeline.orchestration.app import build_orchestrator
+        from pipeline.publish.client import MultiPlatformPublishClient, StubPublishClient
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            corpus_file = temp_path / "seeded_corpus.json"
+            corpus_file.write_text(
+                json.dumps([{"surah": 1, "ayah": 1, "text": "بِسْمِ ٱللَّهِ ٱلرَّحْمَٰنِ ٱلرَّحِيمِ"}]),
+                encoding="utf-8",
+            )
+            db_file = temp_path / "test.db"
+
+            # 1. Test stub client instantiation (default)
+            with patch.dict(
+                "os.environ",
+                {
+                    "QURAN_CORPUS_CACHE_PATH": str(corpus_file),
+                    "STATE_DB_PATH": str(db_file),
+                    "PIPELINE_STORAGE_ROOT": str(temp_path),
+                },
+                clear=False,
+            ):
+                os.environ.pop("PUBLISH_API_KEY", None)
+                settings = OrchestrationSettings.from_env()
+                orch, repo = build_orchestrator(settings)
+                try:
+                    self.assertIsInstance(orch, PipelineOrchestrator)
+                    self.assertIsInstance(orch.publish_service.client, StubPublishClient)
+                finally:
+                    repo.close()
+
+            # 2. Test production client instantiation (with Ayrshare API credentials)
+            with patch.dict(
+                "os.environ",
+                {
+                    "QURAN_CORPUS_CACHE_PATH": str(corpus_file),
+                    "STATE_DB_PATH": str(db_file),
+                    "PIPELINE_STORAGE_ROOT": str(temp_path),
+                    "PUBLISH_API_KEY": "ayr_test_api_key_123",
+                    "PUBLISH_API_BASE_URL": "https://app.ayrshare.com/api",
+                },
+                clear=False,
+            ):
+                settings = OrchestrationSettings.from_env()
+                orch, repo = build_orchestrator(settings)
+                try:
+                    self.assertIsInstance(orch, PipelineOrchestrator)
+                    self.assertIsInstance(orch.publish_service.client, MultiPlatformPublishClient)
+                    self.assertEqual(orch.publish_service.client.api_base_url, "https://app.ayrshare.com/api")
+                finally:
+                    repo.close()
+
 
 
 # ---------------------------------------------------------------------------

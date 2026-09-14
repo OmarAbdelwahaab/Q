@@ -144,8 +144,8 @@ def build_orchestrator(
     # Alignment Stage
     align_settings = AlignmentSettings.from_env()
     aligner = CtcForcedAligner(
-        binary_path=align_settings.aligner_binary,
-        model_name=align_settings.alignment_model,
+        binary=align_settings.aligner_binary,
+        model=align_settings.alignment_model,
         device=align_settings.alignment_device,
         batch_size=align_settings.alignment_batch_size,
     )
@@ -204,7 +204,7 @@ def build_orchestrator(
     pub_settings = PublishSettings.from_env()
     if pub_settings.publish_api_key and pub_settings.publish_api_base_url:
         pub_client = MultiPlatformPublishClient(
-            base_url=pub_settings.publish_api_base_url,
+            api_base_url=pub_settings.publish_api_base_url,
             api_key=pub_settings.publish_api_key,
         )
     else:
@@ -223,7 +223,7 @@ def build_orchestrator(
         media_uploader = StubMediaUploader()
 
     templater = CaptionTemplater(
-        template=pub_settings.publish_caption_template,
+        default_template=pub_settings.publish_caption_template,
         default_hashtags=pub_settings.publish_default_hashtags,
         branding_handle=pub_settings.branding_handle,
     )
