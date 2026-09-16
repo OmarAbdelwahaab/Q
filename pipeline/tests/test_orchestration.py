@@ -412,6 +412,102 @@ class PipelineStateRepositoryTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# PostgreSQL Advisory Lock Integration Tests
+# ---------------------------------------------------------------------------
+
+class PostgreSqlAdvisoryLockIntegrationTests(unittest.TestCase):
+    """Real mutual-exclusion test against a live PostgreSQL instance.
+
+    Skipped gracefully if neither psycopg nor psycopg2 is installed,
+    or if the PostgreSQL service (e.g. from docker-compose) is unreachable.
+    """
+
+    driver: Any = None
+    db_url: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.db_url = os.environ.get(
+            "STATE_DATABASE_URL",
+            "postgresql://quran_user:quran_pass@localhost:5432/quran_pipeline",
+        )
+        try:
+            import psycopg  # type: ignore[import-untyped]
+            cls.driver = psycopg
+        except ImportError:
+            try:
+                import psycopg2  # type: ignore[import-untyped]
+                cls.driver = psycopg2
+            except ImportError:
+                raise unittest.SkipTest(
+                    "Neither psycopg nor psycopg2 is installed; skipping PostgreSQL advisory lock integration test."
+                )
+
+        # Probe reachability via fast socket connection before calling driver
+        try:
+            import socket
+            from urllib.parse import urlparse
+
+            parsed = urlparse(cls.db_url)
+            host = parsed.hostname or "localhost"
+            port = parsed.port or 5432
+            sock = socket.create_connection((host, port), timeout=1.0)
+            sock.close()
+        except Exception as exc:
+            raise unittest.SkipTest(
+                f"PostgreSQL at {cls.db_url} unreachable ({exc}); skipping integration test."
+            )
+
+        # Try connecting to the database
+        try:
+            conn = cls.driver.connect(cls.db_url, connect_timeout=2)
+            conn.close()
+        except Exception as exc:
+            raise unittest.SkipTest(
+                f"PostgreSQL at {cls.db_url} unreachable ({exc}); skipping integration test."
+            )
+
+    def test_real_advisory_lock_mutual_exclusion(self) -> None:
+        """Spawn two connections: verify Connection A acquires lock, Connection B fails, and unlocks cleanly."""
+        lock_key = 888888888
+        conn_a = self.driver.connect(self.db_url)
+        conn_b = self.driver.connect(self.db_url)
+        try:
+            cur_a = conn_a.cursor()
+            cur_b = conn_b.cursor()
+
+            # Connection A acquires advisory lock
+            cur_a.execute("SELECT pg_try_advisory_lock(%s);", (lock_key,))
+            res_a = cur_a.fetchone()
+            acquired_a = res_a[0] if res_a else False
+            self.assertTrue(acquired_a, "Connection A should acquire pg_try_advisory_lock")
+
+            # Connection B attempts to acquire the same advisory lock; must fail
+            cur_b.execute("SELECT pg_try_advisory_lock(%s);", (lock_key,))
+            res_b = cur_b.fetchone()
+            acquired_b = res_b[0] if res_b else False
+            self.assertFalse(acquired_b, "Connection B must fail to acquire the same lock while A holds it")
+
+            # Connection A releases the lock
+            cur_a.execute("SELECT pg_advisory_unlock(%s);", (lock_key,))
+            res_unlock = cur_a.fetchone()
+            unlocked_a = res_unlock[0] if res_unlock else False
+            self.assertTrue(unlocked_a, "Connection A should release pg_advisory_unlock")
+
+            # Connection B now attempts to acquire the lock; must succeed
+            cur_b.execute("SELECT pg_try_advisory_lock(%s);", (lock_key,))
+            res_b_after = cur_b.fetchone()
+            acquired_b_after = res_b_after[0] if res_b_after else False
+            self.assertTrue(acquired_b_after, "Connection B should acquire lock after Connection A releases it")
+
+            # Clean up: Connection B releases the lock
+            cur_b.execute("SELECT pg_advisory_unlock(%s);", (lock_key,))
+        finally:
+            conn_a.close()
+            conn_b.close()
+
+
+# ---------------------------------------------------------------------------
 # 3. PipelineOrchestrator End-to-End Tests
 # ---------------------------------------------------------------------------
 
@@ -636,7 +732,8 @@ class PipelineOrchestratorTests(unittest.TestCase):
         async def fake_sleep(duration: float) -> None:
             slept_durations.append(duration)
 
-        with patch.object(closed_scheduler, "evaluate", return_value=ScheduleDecision(False, 15.0, "Wait 15s")):
+        with patch.object(closed_scheduler, "evaluate", return_value=ScheduleDecision(False, 15.0, "Wait 15s")), \
+             patch.object(closed_scheduler, "is_within_posting_window", return_value=True):
             summary = asyncio.run(
                 self.orchestrator.run(
                     message_id=305,
@@ -778,6 +875,84 @@ class PipelineOrchestratorTests(unittest.TestCase):
         self.assertEqual(summary_b.status, "completed")
         self.mock_publish.publish.assert_awaited_once()
 
+    def test_posting_window_closing_during_render_blocks_publish(self) -> None:
+        """Verify Issue 2 fix: posting window closing during render blocks publish and marks scheduled."""
+        msg_id = 950
+        scheduler = PostingWindowScheduler(
+            enabled=True, start_hour=9, end_hour=23, timezone_name="UTC", min_interval_seconds=0
+        )
+        self.orchestrator.scheduler = scheduler
+
+        self.mock_audio.extract = AsyncMock(return_value=AudioExtractionResult(msg_id, "completed", None, None))
+        self.mock_recognition.recognize = AsyncMock(return_value=RecognitionResult(msg_id, "completed", None, None))
+        self.mock_alignment.align = AsyncMock(return_value=AlignmentResult(msg_id, "completed", None, 1.0))
+        self.mock_qa_gate.evaluate = AsyncMock(return_value=QAGateResult(msg_id, "approved", True))
+        self.mock_render.render = AsyncMock(return_value=RenderResult(msg_id, "completed", None, 10.0))
+        self.mock_publish.publish = AsyncMock(return_value=PublishExecutionResult(msg_id, "completed", None))
+
+        call_count = 0
+
+        def dynamic_window_check(*args: Any, **kwargs: Any) -> bool:
+            nonlocal call_count
+            call_count += 1
+            # Call 1 (step 6 scheduler check before render) -> True
+            # Subsequent calls (step 8 check right before publish) -> False
+            return call_count <= 1
+
+        with patch.object(scheduler, "is_within_posting_window", side_effect=dynamic_window_check):
+            summary = asyncio.run(
+                self.orchestrator.run(message_id=msg_id, enforce_scheduler=True, wait_for_window=False)
+            )
+
+        self.assertEqual(summary.status, "scheduled")
+        self.mock_render.render.assert_awaited_once()
+        self.mock_publish.publish.assert_not_called()
+
+        pub_row = self.state_repo.fetch_stage(msg_id, "publish")
+        self.assertIsNotNone(pub_row)
+        self.assertEqual(pub_row["status"], "scheduled")
+
+        orch_row = self.state_repo.fetch_stage(msg_id, "orchestration")
+        self.assertIsNotNone(orch_row)
+        self.assertEqual(orch_row["status"], "scheduled")
+
+    def test_held_for_review_requires_force_to_retry(self) -> None:
+        """Verify Issue 4 fix: held_for_review messages require --force to retry."""
+        msg_id = 960
+        self.mock_audio.extract = AsyncMock(return_value=AudioExtractionResult(msg_id, "completed", None, None))
+        self.mock_recognition.recognize = AsyncMock(return_value=RecognitionResult(msg_id, "completed", None, None))
+        self.mock_alignment.align = AsyncMock(return_value=AlignmentResult(msg_id, "completed", None, 1.0))
+        self.mock_qa_gate.evaluate = AsyncMock(return_value=QAGateResult(msg_id, "approved", True))
+        self.mock_render.render = AsyncMock(return_value=RenderResult(msg_id, "completed", None, 10.0))
+        self.mock_publish.publish = AsyncMock(return_value=PublishExecutionResult(msg_id, "completed", None))
+
+        # 1. Set message status to held_for_review
+        self.state_repo.upsert_stage(msg_id, "orchestration", "held_for_review")
+
+        # 2. Run orchestrator with force=False -> assert claim rejected, status remains held_for_review, pipeline does not run
+        summary_no_force = asyncio.run(
+            self.orchestrator.run(message_id=msg_id, force=False)
+        )
+        self.assertEqual(summary_no_force.status, "held_for_review")
+        self.mock_audio.extract.assert_not_called()
+        self.mock_publish.publish.assert_not_called()
+
+        stage_row = self.state_repo.fetch_stage(msg_id, "orchestration")
+        self.assertIsNotNone(stage_row)
+        self.assertEqual(stage_row["status"], "held_for_review")
+
+        # 3. Run orchestrator with force=True -> assert claim acquired, pipeline runs and completes
+        summary_force = asyncio.run(
+            self.orchestrator.run(message_id=msg_id, force=True)
+        )
+        self.assertEqual(summary_force.status, "completed")
+        self.mock_audio.extract.assert_awaited_once()
+        self.mock_publish.publish.assert_awaited_once()
+
+        orch_final = self.state_repo.fetch_stage(msg_id, "orchestration")
+        self.assertIsNotNone(orch_final)
+        self.assertEqual(orch_final["status"], "completed")
+
 
 
 # ---------------------------------------------------------------------------
@@ -796,9 +971,19 @@ class N8nWorkflowIntegrityTests(unittest.TestCase):
         self.assertEqual(data["name"], "Quran Video Pipeline - Orchestration")
         nodes = {node["name"]: node for node in data["nodes"]}
 
-        # Required nodes
+        # Required collapsed nodes (4 nodes total)
         expected_nodes = [
             "Telegram Video Trigger",
+            "Run Pipeline Orchestrator",
+            "Check Orchestration Exit Code",
+            "Alert QA Review Queue",
+        ]
+        self.assertEqual(len(nodes), len(expected_nodes), f"Expected exactly {len(expected_nodes)} nodes, found {len(nodes)}")
+        for expected in expected_nodes:
+            self.assertIn(expected, nodes, f"Missing required node: {expected}")
+
+        # Per-stage nodes must be completely removed
+        obsolete_nodes = [
             "Ingest Video Message",
             "Extract Audio WAV",
             "Recognize Quran Verses",
@@ -809,68 +994,43 @@ class N8nWorkflowIntegrityTests(unittest.TestCase):
             "Check Posting Window Allowed",
             "Render 1080x1920 Video",
             "Multi-Platform Publish",
-            "Alert QA Review Queue",
         ]
-        for expected in expected_nodes:
-            self.assertIn(expected, nodes, f"Missing required node: {expected}")
+        for obsolete in obsolete_nodes:
+            self.assertNotIn(obsolete, nodes, f"Obsolete per-stage node must be removed: {obsolete}")
 
-        # Connections check
+        # Verify Run Pipeline Orchestrator node configuration
+        orch_node = nodes["Run Pipeline Orchestrator"]
+        self.assertEqual(orch_node["type"], "n8n-nodes-base.executeCommand")
+        self.assertTrue(orch_node.get("continueOnFail", False), "Run Pipeline Orchestrator must set continueOnFail to True")
+        cmd = orch_node["parameters"]["command"]
+        self.assertIn("python -m pipeline.orchestration.app", cmd)
+        self.assertIn("{{$('Telegram Video Trigger').item.json.message.message_id}}", cmd)
+        self.assertIn("--json", cmd)
+
+        # Verify Check Orchestration Exit Code IF node
+        if_node = nodes["Check Orchestration Exit Code"]
+        self.assertEqual(if_node["type"], "n8n-nodes-base.if")
+        conditions = if_node["parameters"]["conditions"]
+        self.assertIn("number", conditions)
+        num_cond = conditions["number"][0]
+        self.assertEqual(num_cond["value1"], '={{$json["exitCode"]}}')
+        self.assertEqual(num_cond["operation"], "equal")
+        self.assertEqual(num_cond["value2"], 2)
+
+        # Verify Connections
         connections = data["connections"]
         self.assertEqual(
             connections["Telegram Video Trigger"]["main"][0][0]["node"],
-            "Ingest Video Message",
+            "Run Pipeline Orchestrator",
         )
         self.assertEqual(
-            connections["QA Gate Verification"]["main"][0][0]["node"],
-            "Check QA Gate Approved",
-        )
-
-        # IF node branching: output 0 -> posting window check, output 1 -> review alert
-        if_outputs = connections["Check QA Gate Approved"]["main"]
-        self.assertEqual(len(if_outputs), 2)
-        self.assertEqual(if_outputs[0][0]["node"], "Posting Window & Rate Limit Check")
-        self.assertEqual(if_outputs[1][0]["node"], "Alert QA Review Queue")
-
-        # Posting window check connects to Check Posting Window Allowed IF node
-        self.assertEqual(
-            connections["Posting Window & Rate Limit Check"]["main"][0][0]["node"],
-            "Check Posting Window Allowed",
-        )
-        # Check Posting Window Allowed true branch (output 0) connects to Render
-        self.assertEqual(
-            connections["Check Posting Window Allowed"]["main"][0][0]["node"],
-            "Render 1080x1920 Video",
+            connections["Run Pipeline Orchestrator"]["main"][0][0]["node"],
+            "Check Orchestration Exit Code",
         )
         self.assertEqual(
-            connections["Render 1080x1920 Video"]["main"][0][0]["node"],
-            "Multi-Platform Publish",
+            connections["Check Orchestration Exit Code"]["main"][0][0]["node"],
+            "Alert QA Review Queue",
         )
-
-        # Verify downstream nodes use explicit named trigger node reference instead of broken $json
-        downstream_command_nodes = [
-            "Extract Audio WAV",
-            "Recognize Quran Verses",
-            "CTC Forced Alignment",
-            "QA Gate Verification",
-            "Render 1080x1920 Video",
-            "Multi-Platform Publish",
-        ]
-        for node_name in downstream_command_nodes:
-            cmd = nodes[node_name]["parameters"]["command"]
-            self.assertIn(
-                "{{$('Telegram Video Trigger').item.json.message.message_id}}",
-                cmd,
-                f"Node '{node_name}' must use named trigger reference for message_id",
-            )
-            self.assertNotIn(
-                '{{$json["message"]["message_id"]}}',
-                cmd,
-                f"Node '{node_name}' should not use $json['message']['message_id']",
-            )
-
-        # Verify posting window check signals exit code for IF gating
-        post_window_cmd = nodes["Posting Window & Rate Limit Check"]["parameters"]["command"]
-        self.assertIn("sys.exit(0 if d.can_post else 1)", post_window_cmd)
 
         # Verify errorWorkflow linkage
         self.assertEqual(

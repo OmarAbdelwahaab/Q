@@ -19,12 +19,13 @@
     },
     {
       "parameters": {
-        "command": "python -m pipeline.ingestion.app {{$json[\"message\"][\"message_id\"]}}"
+        "command": "python -m pipeline.orchestration.app {{$('Telegram Video Trigger').item.json.message.message_id}} --json"
       },
       "id": "22222222-2222-2222-2222-222222222222",
-      "name": "Ingest Video Message",
+      "name": "Run Pipeline Orchestrator",
       "type": "n8n-nodes-base.executeCommand",
       "typeVersion": 1,
+      "continueOnFail": true,
       "position": [
         440,
         300
@@ -32,135 +33,23 @@
     },
     {
       "parameters": {
-        "command": "python -m pipeline.audio.app {{$('Telegram Video Trigger').item.json.message.message_id}}"
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{$json[\"exitCode\"]}}",
+              "operation": "equal",
+              "value2": 2
+            }
+          ]
+        }
       },
       "id": "33333333-3333-3333-3333-333333333333",
-      "name": "Extract Audio WAV",
-      "type": "n8n-nodes-base.executeCommand",
+      "name": "Check Orchestration Exit Code",
+      "type": "n8n-nodes-base.if",
       "typeVersion": 1,
       "position": [
         660,
         300
-      ]
-    },
-    {
-      "parameters": {
-        "command": "python -m pipeline.recognition.app {{$('Telegram Video Trigger').item.json.message.message_id}}"
-      },
-      "id": "44444444-4444-4444-4444-444444444444",
-      "name": "Recognize Quran Verses",
-      "type": "n8n-nodes-base.executeCommand",
-      "typeVersion": 1,
-      "position": [
-        880,
-        300
-      ]
-    },
-    {
-      "parameters": {
-        "command": "python -m pipeline.alignment.app {{$('Telegram Video Trigger').item.json.message.message_id}}"
-      },
-      "id": "55555555-5555-5555-5555-555555555555",
-      "name": "CTC Forced Alignment",
-      "type": "n8n-nodes-base.executeCommand",
-      "typeVersion": 1,
-      "position": [
-        1100,
-        300
-      ]
-    },
-    {
-      "parameters": {
-        "command": "python -m pipeline.qa_gate.app {{$('Telegram Video Trigger').item.json.message.message_id}}"
-      },
-      "id": "66666666-6666-6666-6666-666666666666",
-      "name": "QA Gate Verification",
-      "type": "n8n-nodes-base.executeCommand",
-      "typeVersion": 1,
-      "position": [
-        1320,
-        300
-      ]
-    },
-    {
-      "parameters": {
-        "conditions": {
-          "number": [
-            {
-              "value1": "={{$json[\"exitCode\"]}}",
-              "operation": "equal",
-              "value2": 0
-            }
-          ]
-        }
-      },
-      "id": "77777777-7777-7777-7777-777777777777",
-      "name": "Check QA Gate Approved",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 1,
-      "position": [
-        1540,
-        300
-      ]
-    },
-    {
-      "parameters": {
-        "command": "python -c \"import sys; from pipeline.orchestration.scheduler import PostingWindowScheduler; from pipeline.config import OrchestrationSettings; s = OrchestrationSettings.from_env(); sched = PostingWindowScheduler(enabled=s.posting_window_enabled, start_hour=s.posting_window_start_hour, end_hour=s.posting_window_end_hour, timezone_name=s.posting_window_timezone, min_interval_seconds=s.rate_limit_min_interval_seconds); d = sched.evaluate(); sys.exit(0 if d.can_post else 1)\""
-      },
-      "id": "88888888-8888-8888-8888-888888888888",
-      "name": "Posting Window & Rate Limit Check",
-      "type": "n8n-nodes-base.executeCommand",
-      "typeVersion": 1,
-      "position": [
-        1760,
-        220
-      ]
-    },
-    {
-      "parameters": {
-        "conditions": {
-          "number": [
-            {
-              "value1": "={{$json[\"exitCode\"]}}",
-              "operation": "equal",
-              "value2": 0
-            }
-          ]
-        }
-      },
-      "id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
-      "name": "Check Posting Window Allowed",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 1,
-      "position": [
-        1980,
-        220
-      ]
-    },
-    {
-      "parameters": {
-        "command": "python -m pipeline.render.app {{$('Telegram Video Trigger').item.json.message.message_id}}"
-      },
-      "id": "99999999-9999-9999-9999-999999999999",
-      "name": "Render 1080x1920 Video",
-      "type": "n8n-nodes-base.executeCommand",
-      "typeVersion": 1,
-      "position": [
-        2200,
-        220
-      ]
-    },
-    {
-      "parameters": {
-        "command": "python -m pipeline.publish.app {{$('Telegram Video Trigger').item.json.message.message_id}}"
-      },
-      "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-      "name": "Multi-Platform Publish",
-      "type": "n8n-nodes-base.executeCommand",
-      "typeVersion": 1,
-      "position": [
-        2420,
-        220
       ]
     },
     {
@@ -176,8 +65,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 3,
       "position": [
-        1760,
-        420
+        880,
+        300
       ]
     }
   ],
@@ -186,113 +75,29 @@
       "main": [
         [
           {
-            "node": "Ingest Video Message",
+            "node": "Run Pipeline Orchestrator",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Ingest Video Message": {
+    "Run Pipeline Orchestrator": {
       "main": [
         [
           {
-            "node": "Extract Audio WAV",
+            "node": "Check Orchestration Exit Code",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Extract Audio WAV": {
+    "Check Orchestration Exit Code": {
       "main": [
-        [
-          {
-            "node": "Recognize Quran Verses",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Recognize Quran Verses": {
-      "main": [
-        [
-          {
-            "node": "CTC Forced Alignment",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "CTC Forced Alignment": {
-      "main": [
-        [
-          {
-            "node": "QA Gate Verification",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "QA Gate Verification": {
-      "main": [
-        [
-          {
-            "node": "Check QA Gate Approved",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Check QA Gate Approved": {
-      "main": [
-        [
-          {
-            "node": "Posting Window & Rate Limit Check",
-            "type": "main",
-            "index": 0
-          }
-        ],
         [
           {
             "node": "Alert QA Review Queue",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Posting Window & Rate Limit Check": {
-      "main": [
-        [
-          {
-            "node": "Check Posting Window Allowed",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Check Posting Window Allowed": {
-      "main": [
-        [
-          {
-            "node": "Render 1080x1920 Video",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Render 1080x1920 Video": {
-      "main": [
-        [
-          {
-            "node": "Multi-Platform Publish",
             "type": "main",
             "index": 0
           }

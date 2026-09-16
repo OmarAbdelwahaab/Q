@@ -385,7 +385,7 @@ class PipelineStateRepository:
                 pub_row = cur.fetchone()
                 if pub_row:
                     status = pub_row[0] if isinstance(pub_row, (tuple, list)) else pub_row["status"]
-                    if status == "completed":
+                    if status == "completed" and not force:
                         conn.commit()
                         return False, "already_completed"
 
@@ -397,12 +397,28 @@ class PipelineStateRepository:
                 stage_row = cur.fetchone()
                 if stage_row:
                     status = stage_row[0] if isinstance(stage_row, (tuple, list)) else stage_row["status"]
-                    if status == "completed":
+                    if status == "completed" and not force:
                         conn.commit()
                         return False, "already_completed"
+                    if status == "held_for_review" and not force:
+                        conn.commit()
+                        return False, "held_for_review"
                     if status == "processing" and not force:
                         conn.commit()
                         return False, "active_execution"
+
+                # Also check if qa_gate was held_for_review
+                if not force and stage != "qa_gate":
+                    sql_qa = self._format_sql(
+                        "SELECT status FROM pipeline_items WHERE message_id = ? AND stage = ?"
+                    )
+                    cur.execute(sql_qa, (message_id, "qa_gate"))
+                    qa_row = cur.fetchone()
+                    if qa_row:
+                        qa_status = qa_row[0] if isinstance(qa_row, (tuple, list)) else qa_row["status"]
+                        if qa_status in ("held_for_review", "rejected"):
+                            conn.commit()
+                            return False, "held_for_review"
 
                 # 3. Atomically upsert claim status to 'processing'
                 sql_claim = self._format_sql(
