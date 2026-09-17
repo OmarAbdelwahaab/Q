@@ -232,7 +232,7 @@ class PipelineOrchestrator:
                 "storage_path": str(raw_video_path),
             }
             effective_source = raw_video_path
-        elif self.ingestion_service is not None:
+        else:
             err = f"Source video does not exist: {raw_video_path} and no source was provided"
             self.logger.error(err, extra={"message_id": message_id})
             self.state_repository.upsert_stage(message_id, "ingestion", "failed", err)

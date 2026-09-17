@@ -529,6 +529,12 @@ class PipelineOrchestratorTests(unittest.TestCase):
         self.state_repo = PipelineStateRepository(self.storage_root / "test_state.db")
         self.alerts = RecordingAlertService()
 
+        # Seed dummy raw video files so mock tests pass the ingestion stage check
+        self.raw_dir = self.storage_root / "raw"
+        self.raw_dir.mkdir(parents=True, exist_ok=True)
+        for mid in (201, 302, 303, 304, 305, 402, 888, 901, 902, 950, 960):
+            (self.raw_dir / f"{mid}.mp4").write_bytes(b"mock video data")
+
         # Mock stage services
         self.mock_audio = MagicMock(spec=AudioExtractionService)
         self.mock_recognition = MagicMock(spec=RecognitionService)
@@ -609,6 +615,7 @@ class PipelineOrchestratorTests(unittest.TestCase):
 
         self.assertEqual(summary.status, "completed")
         self.assertEqual(summary.message_id, 201)
+        self.assertIn("ingestion", summary.stages)
         self.assertIn("audio", summary.stages)
         self.assertIn("recognition", summary.stages)
         self.assertIn("alignment", summary.stages)
@@ -970,17 +977,6 @@ class PipelineOrchestratorTests(unittest.TestCase):
         # Ensure raw directory has no video for this message
         raw_video = self.storage_root / "raw" / f"{msg_id}.mp4"
         raw_video.unlink(missing_ok=True)
-
-        # Wire an ingestion service
-        from pipeline.ingestion.service import IngestionService
-        from pipeline.storage import LocalArtifactStorage
-        storage = LocalArtifactStorage(self.storage_root)
-        ingestion_service = IngestionService(
-            storage=storage,
-            state_repository=self.state_repo,
-            alert_service=self.alerts,
-        )
-        self.orchestrator.ingestion_service = ingestion_service
 
         summary = asyncio.run(
             self.orchestrator.run(message_id=msg_id, source_path=None)

@@ -58,6 +58,7 @@ Phase 8 validates the end-to-end workflow orchestration, time-of-day posting-win
 | **Orchestrator** | Scheduled outcome retry non-deadlock | `PipelineOrchestrator` | Message deferred by closed window resets claim; subsequent run when window opens completes normally |
 | **Orchestrator** | Downstream failure unblocks others | `PipelineOrchestrator` | Render failure on message A leaves publish unreserved; message B runs immediately and publishes cleanly |
 | **Orchestrator** | QA Gate rejection halt | `PipelineOrchestrator` | Rejection stops pipeline immediately; render and publish are never called |
+| **Orchestrator** | Cold start without raw video | `PipelineOrchestrator` | When neither --source nor raw/{id}.mp4 exists, halts cleanly at ingestion stage with failed status, state store record, alert, exit code 1 (works with or without ingestion_service wired) |
 | **Orchestrator** | Held for review retry blocking | `PipelineOrchestrator` | Re-running held_for_review item with `force=False` is rejected; `force=True` re-acquires claim and runs pipeline |
 | **Orchestrator** | Stage failure halt & alert | `PipelineOrchestrator` | Stage failure stops downstream execution, alerts, and returns failed status |
 | **Orchestrator** | Scheduler pauses when closed | `PipelineOrchestrator` | Outside window pauses before render/publish, records `scheduled` state |

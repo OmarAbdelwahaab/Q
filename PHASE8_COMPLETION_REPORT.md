@@ -102,6 +102,11 @@
   - Synthesizes real test video with live system FFmpeg $\to$ audio extraction $\to$ recognition $\to$ alignment $\to$ QA gate $\to$ FFmpeg 1080x1920 render with Arabic subtitles $\to$ publish in draft mode.
   - Verifies render artifact (1080x1920, h264, audio), draft publish artifact, state store records for all 6 stages, and verifies that a second run skips instantly via idempotency.
 
+- **Ingestion Failure Decoupled from Ingestion Service Injection (`pipeline/orchestration/runner.py`)**:
+  - Changed `elif self.ingestion_service is not None:` in `PipelineOrchestrator.run()` to `else:`.
+  - Guarantees that cold-start execution without `--source` and without pre-existing raw video unconditionally halts cleanly at Stage 1 (`ingestion`), records `(message_id, "ingestion", "failed")`, alerts, and exits with code 1, regardless of whether `ingestion_service` was injected.
+  - Updated `test_cold_start_without_raw_video_fails_cleanly` to test against the un-wired default orchestrator instance, and pre-seeded dummy mock videos in `setUp` for downstream stage mock tests.
+
 ---
 
 ## 2. Verification Results
