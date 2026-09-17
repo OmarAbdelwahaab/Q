@@ -49,9 +49,10 @@ Phase 8 validates the end-to-end workflow orchestration, time-of-day posting-win
 | **State Store** | Multi-threaded claim contention | `PipelineStateRepository` | 8 concurrent threads race for same ID; exactly 1 acquires claim, 7 rejected with `active_execution` |
 | **State Store** | Multi-threaded reserve contention | `PipelineStateRepository` | 8 concurrent threads race for rate-limit slot; exactly 1 acquires slot, 7 blocked with `Rate limit active` |
 | **State Store** | PostgreSQL advisory xact locks | `PipelineStateRepository` | Asserts PostgreSQL queries execute `pg_advisory_xact_lock` for claim and reserve transactions |
-| **State Store** | Real PostgreSQL advisory lock integration | `PostgreSqlAdvisoryLockIntegrationTests` | Multi-connection mutual exclusion using `pg_try_advisory_lock` / `pg_advisory_unlock` against live PostgreSQL (gracefully skipped if unreachable/no driver) |
+| **State Store** | Real PostgreSQL advisory lock integration | `PostgreSqlAdvisoryLockIntegrationTests` | Multi-connection mutual exclusion using `pg_try_advisory_lock` / `pg_advisory_unlock` against live PostgreSQL (`postgresql://pipeline:pipeline@localhost:5432/pipeline`), verified passing |
 | **State Store** | Connection pool lifecycle & close | `PipelineStateRepository` | Safe pool shutdown on `close()`; no-op on SQLite |
 | **Orchestrator** | Happy path execution | `PipelineOrchestrator` | Runs audio $\to$ recognition $\to$ alignment $\to$ QA gate $\to$ render $\to$ publish |
+| **Orchestrator** | Cold start without raw video | `PipelineOrchestrator` | Missing raw video without `--source` cleanly halts at stage `ingestion`, records failed state, alerts, exits code 1 |
 | **Orchestrator** | Idempotency enforcement | `PipelineOrchestrator` | Skips already published message without executing any stage |
 | **Orchestrator** | Active execution lock skip | `PipelineOrchestrator` | Detects concurrent worker claim and safely skips with `skipped_active_execution` (exit 0) |
 | **Orchestrator** | Scheduled outcome retry non-deadlock | `PipelineOrchestrator` | Message deferred by closed window resets claim; subsequent run when window opens completes normally |
@@ -63,7 +64,7 @@ Phase 8 validates the end-to-end workflow orchestration, time-of-day posting-win
 | **Orchestrator** | Posting window closing during render | `PipelineOrchestrator` | When posting window closes during render duration, publish is blocked, item marked `scheduled`, exit 0 |
 | **Orchestrator** | Wait for window delay | `PipelineOrchestrator` | Waits duration via sleep callback then completes render and publish |
 | **Orchestrator** | Rate limit slot contention halt | `PipelineOrchestrator` | When slot is reserved by another item and not waiting, halts with `scheduled` state |
-| **n8n Workflow** | Main workflow structure | `workflow.json` | Valid JSON, contains 4 collapsed nodes (`Telegram Video Trigger`, `Run Pipeline Orchestrator`, `Check Orchestration Exit Code`, `Alert QA Review Queue`), named trigger references, and error link |
+| **n8n Workflow** | Main workflow structure | `workflow.json` | Valid JSON, contains 6 collapsed nodes (`Telegram Video Trigger`, `Run Pipeline Orchestrator`, `Check Orchestration Exit Code`, `Alert QA Review Queue`, `Check Execution Succeeded`, `Alert Pipeline Failure`), both outputs connected, named trigger references, and error link |
 | **n8n Workflow** | Error workflow structure | `error_workflow.json` | Valid JSON, contains Error Trigger $\to$ Format $\to$ Update State $\to$ Alert |
 | **CLI & Config** | Argument parsing | `pipeline.orchestration.app` | Parses `--draft`, `--skip-scheduler`, `--wait-for-window`, `--force`, `--json` |
 | **CLI & Config** | Environment loading | `OrchestrationSettings` | Parses posting window hours, timezone, and rate limit intervals |

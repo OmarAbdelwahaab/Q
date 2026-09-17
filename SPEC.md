@@ -127,7 +127,16 @@ Orchestrated by n8n, with each stage above implemented as a callable service/ste
 - **Tool**: n8n (self-hosted, Docker).
 - **Workflow**: Telegram trigger → ingestion → audio → recognition → alignment →
   QA gate → render → publish.
-- **Error workflow**: any node failure triggers an alert and marks the item failed in
+- **Pipeline Orchestrator (`runner.py`)**: Coordinates stages 1–8 with unified idempotency,
+  stage 1 raw video verification/ingestion from source path, fail-closed error handling,
+  posting window and rate limit checks, and alerting.
+- **n8n Production Workflow (`workflow.json`)**: Triggered on incoming Telegram posts,
+  executes `python -m pipeline.orchestration.app {message_id} --json` with `continueOnFail: true`,
+  and branches on exit code:
+  - Exit code 0: Succeeded / scheduled / skipped.
+  - Exit code 2: `held_for_review`, alerts QA review queue.
+  - Exit code 1: Technical failure, alerts monitoring webhook via `Alert Pipeline Failure`.
+- **Error workflow (`error_workflow.json`)**: any node failure triggers an alert and marks the item failed in
   the state store without blocking subsequent items.
 
 ### 4.9 State & storage

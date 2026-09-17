@@ -429,7 +429,7 @@ class PostgreSqlAdvisoryLockIntegrationTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.db_url = os.environ.get(
             "STATE_DATABASE_URL",
-            "postgresql://quran_user:quran_pass@localhost:5432/quran_pipeline",
+            "postgresql://pipeline:pipeline@localhost:5432/pipeline",
         )
         try:
             import psycopg  # type: ignore[import-untyped]
@@ -451,8 +451,19 @@ class PostgreSqlAdvisoryLockIntegrationTests(unittest.TestCase):
             parsed = urlparse(cls.db_url)
             host = parsed.hostname or "localhost"
             port = parsed.port or 5432
-            sock = socket.create_connection((host, port), timeout=1.0)
-            sock.close()
+            probe_hosts = ["127.0.0.1", host] if host == "localhost" else [host]
+            connected = False
+            last_err = None
+            for probe_host in probe_hosts:
+                try:
+                    sock = socket.create_connection((probe_host, port), timeout=1.0)
+                    sock.close()
+                    connected = True
+                    break
+                except Exception as probe_err:
+                    last_err = probe_err
+            if not connected:
+                raise TimeoutError(f"Could not connect to {host}:{port}: {last_err}")
         except Exception as exc:
             raise unittest.SkipTest(
                 f"PostgreSQL at {cls.db_url} unreachable ({exc}); skipping integration test."
@@ -953,6 +964,63 @@ class PipelineOrchestratorTests(unittest.TestCase):
         self.assertIsNotNone(orch_final)
         self.assertEqual(orch_final["status"], "completed")
 
+    def test_cold_start_without_raw_video_fails_cleanly(self) -> None:
+        """Verify Issue 3: cold start with missing raw video and no --source fails cleanly at ingestion stage."""
+        msg_id = 9999
+        # Ensure raw directory has no video for this message
+        raw_video = self.storage_root / "raw" / f"{msg_id}.mp4"
+        raw_video.unlink(missing_ok=True)
+
+        # Wire an ingestion service
+        from pipeline.ingestion.service import IngestionService
+        from pipeline.storage import LocalArtifactStorage
+        storage = LocalArtifactStorage(self.storage_root)
+        ingestion_service = IngestionService(
+            storage=storage,
+            state_repository=self.state_repo,
+            alert_service=self.alerts,
+        )
+        self.orchestrator.ingestion_service = ingestion_service
+
+        summary = asyncio.run(
+            self.orchestrator.run(message_id=msg_id, source_path=None)
+        )
+
+        # 1. Summary status is 'failed', not an unhandled exception or crash
+        self.assertEqual(summary.status, "failed")
+        self.assertIsNotNone(summary.error)
+        self.assertIn("Source video does not exist", summary.error or "")
+
+        # 2. Ingestion stage recorded as failed in state repository and summary
+        self.assertIn("ingestion", summary.stages)
+        self.assertEqual(summary.stages["ingestion"]["status"], "failed")
+
+        ingestion_row = self.state_repo.fetch_stage(msg_id, "ingestion")
+        self.assertIsNotNone(ingestion_row)
+        self.assertEqual(ingestion_row["status"], "failed")
+        self.assertIn("Source video does not exist", ingestion_row["error"] or "")
+
+        orch_row = self.state_repo.fetch_stage(msg_id, "orchestration")
+        self.assertIsNotNone(orch_row)
+        self.assertEqual(orch_row["status"], "failed")
+
+        # 3. Downstream stages were never invoked
+        self.mock_audio.extract.assert_not_called()
+        self.mock_recognition.recognize.assert_not_called()
+        self.mock_render.render.assert_not_called()
+        self.mock_publish.publish.assert_not_called()
+
+        # 4. Ingestion failure alert was dispatched
+        self.assertTrue(len(self.alerts.alerts) > 0)
+        self.assertTrue(any("ingestion" in a for a in self.alerts.alerts))
+
+        # 5. CLI returns exit code 1 cleanly without raising uncaught exceptions
+        with patch("pipeline.orchestration.app.build_orchestrator") as mock_build:
+            mock_build.return_value = (self.orchestrator, self.state_repo)
+            code = asyncio.run(cli_main([str(msg_id), "--json"]))
+            self.assertEqual(code, 1)
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -971,12 +1039,14 @@ class N8nWorkflowIntegrityTests(unittest.TestCase):
         self.assertEqual(data["name"], "Quran Video Pipeline - Orchestration")
         nodes = {node["name"]: node for node in data["nodes"]}
 
-        # Required collapsed nodes (4 nodes total)
+        # Required collapsed nodes (6 nodes total including dual-branch exit code handling)
         expected_nodes = [
             "Telegram Video Trigger",
             "Run Pipeline Orchestrator",
             "Check Orchestration Exit Code",
             "Alert QA Review Queue",
+            "Check Execution Succeeded",
+            "Alert Pipeline Failure",
         ]
         self.assertEqual(len(nodes), len(expected_nodes), f"Expected exactly {len(expected_nodes)} nodes, found {len(nodes)}")
         for expected in expected_nodes:
@@ -1007,7 +1077,7 @@ class N8nWorkflowIntegrityTests(unittest.TestCase):
         self.assertIn("{{$('Telegram Video Trigger').item.json.message.message_id}}", cmd)
         self.assertIn("--json", cmd)
 
-        # Verify Check Orchestration Exit Code IF node
+        # Verify Check Orchestration Exit Code IF node (exitCode == 2)
         if_node = nodes["Check Orchestration Exit Code"]
         self.assertEqual(if_node["type"], "n8n-nodes-base.if")
         conditions = if_node["parameters"]["conditions"]
@@ -1016,6 +1086,20 @@ class N8nWorkflowIntegrityTests(unittest.TestCase):
         self.assertEqual(num_cond["value1"], '={{$json["exitCode"]}}')
         self.assertEqual(num_cond["operation"], "equal")
         self.assertEqual(num_cond["value2"], 2)
+
+        # Verify Check Execution Succeeded IF node (exitCode == 0)
+        succ_node = nodes["Check Execution Succeeded"]
+        self.assertEqual(succ_node["type"], "n8n-nodes-base.if")
+        succ_conditions = succ_node["parameters"]["conditions"]
+        self.assertIn("number", succ_conditions)
+        succ_cond = succ_conditions["number"][0]
+        self.assertEqual(succ_cond["value1"], '={{$json["exitCode"]}}')
+        self.assertEqual(succ_cond["operation"], "equal")
+        self.assertEqual(succ_cond["value2"], 0)
+
+        # Verify Alert Pipeline Failure HTTP node
+        fail_node = nodes["Alert Pipeline Failure"]
+        self.assertEqual(fail_node["type"], "n8n-nodes-base.httpRequest")
 
         # Verify Connections
         connections = data["connections"]
@@ -1027,9 +1111,27 @@ class N8nWorkflowIntegrityTests(unittest.TestCase):
             connections["Run Pipeline Orchestrator"]["main"][0][0]["node"],
             "Check Orchestration Exit Code",
         )
+
+        # Both output arrays must exist for Check Orchestration Exit Code
+        self.assertEqual(
+            len(connections["Check Orchestration Exit Code"]["main"]),
+            2,
+            "Check Orchestration Exit Code must provide two output connection arrays (true and false branches)",
+        )
+        # Output 0 (True: exitCode == 2) -> Alert QA Review Queue
         self.assertEqual(
             connections["Check Orchestration Exit Code"]["main"][0][0]["node"],
             "Alert QA Review Queue",
+        )
+        # Output 1 (False: exitCode != 2) -> Check Execution Succeeded
+        self.assertEqual(
+            connections["Check Orchestration Exit Code"]["main"][1][0]["node"],
+            "Check Execution Succeeded",
+        )
+        # False branch of Check Execution Succeeded (exitCode != 0) -> Alert Pipeline Failure
+        self.assertEqual(
+            connections["Check Execution Succeeded"]["main"][1][0]["node"],
+            "Alert Pipeline Failure",
         )
 
         # Verify errorWorkflow linkage

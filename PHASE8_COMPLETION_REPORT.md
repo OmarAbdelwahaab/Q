@@ -1,7 +1,7 @@
 # Phase 8 Completion Report — Workflow Orchestration, Scheduling & Dual-Tier State
 
-**Status:** Implementation complete; all 114 unit, integration, dry-run, concurrency, and CLI tests passing cleanly under both `python -m unittest discover` and `pytest -v` (1 skipped gracefully for live PostgreSQL container).  
-**Date:** 2026-09-16
+**Status:** Implementation and follow-up review fixes complete; all 116 unit, integration, dry-run, concurrency, and CLI tests passing cleanly (0 skipped, 0 failures) under both `python -m unittest discover` and `pytest -v` against live PostgreSQL.  
+**Date:** 2026-09-17
 
 ---
 
@@ -10,16 +10,35 @@
 - **Complete 7-Stage Pipeline Orchestrator (`pipeline/orchestration/runner.py`)**:
   - Implemented `PipelineOrchestrator` coordinating the full lifecycle for a given video message:
     1. Idempotency check & atomic claim (`claim_execution`).
-    2. Audio extraction (`AudioExtractionService` $\to$ 16kHz mono WAV).
-    3. Verse recognition (`RecognitionService` $\to$ canonical Quran match JSON).
-    4. Forced alignment (`AlignmentService` $\to$ word timestamps).
-    5. QA Gate verification (`QAGateService`). If rejected/held, execution halts immediately, state is recorded as `rejected`, alerts are dispatched, and render/publish are **never executed**.
-    6. Scheduler evaluation & atomic rate-limit slot reservation (`reserve_publish_slot`).
-    7. Video render (`RenderService` composing background, HarfBuzz RTL karaoke ASS subtitles, audio, and branding into 1080x1920 MP4).
-    8. Multi-platform publish (`PublishService` uploading to public URL and posting via Ayrshare in live or draft mode).
+    2. Stage 1 Ingestion: validates presence of `raw/{message_id}.mp4` or copies from `--source`; halts cleanly at `ingestion` with `failed` status if missing.
+    3. Stage 2 Audio extraction (`AudioExtractionService` $\to$ 16kHz mono WAV).
+    4. Stage 3 Verse recognition (`RecognitionService` $\to$ canonical Quran match JSON).
+    5. Stage 4 Forced alignment (`AlignmentService` $\to$ word timestamps).
+    6. Stage 5 QA Gate verification (`QAGateService`). If rejected/held, execution halts immediately, state is recorded as `held_for_review`, alerts are dispatched, and render/publish are **never executed**.
+    7. Stage 6 Scheduler evaluation & atomic rate-limit slot reservation (`reserve_publish_slot`).
+    8. Stage 7 Video render (`RenderService` composing background, HarfBuzz RTL karaoke ASS subtitles, audio, and branding into 1080x1920 MP4).
+    9. Stage 8 Multi-platform publish (`PublishService` uploading to public URL and posting via Ayrshare in live or draft mode).
   - Clean error boundaries: any unhandled exception in any stage marks state as `failed`, alerts via `AlertService`, and halts progression for that item without crashing other jobs.
-  - **Refactored `run()` boilerplate**: Extracted `_run_stage` consolidating error handling, logging, state store upsert, and alert dispatch, eliminating ~250 lines of duplicate code across all 6 stages.
-  - **Cleaned dead imports**: Removed unused `datetime, timezone` imports from `runner.py`.
+  - **Refactored `run()` boilerplate**: Extracted `_run_stage` consolidating error handling, logging, state store upsert, and alert dispatch, eliminating ~250 lines of duplicate code.
+
+- **Follow-Up Review Fixes**:
+  - **Ingestion Stage Integration & Docker Compose Service (Issue 1)**:
+    - Added `IngestionService` into `build_orchestrator()` and `PipelineOrchestrator.__init__`.
+    - Integrated Stage 1 (`ingestion`) into `PipelineOrchestrator.run()`: handles explicit `--source`, validates pre-downloaded `raw/{message_id}.mp4`, and halts cleanly at `ingestion` with `status="failed"` on cold start without video.
+    - Added `ingestion` service container to `docker-compose.yml` running `pipeline.ingestion.app` continuously with shared volume mounting.
+  - **n8n Workflow Dual Connections & Failure Alerting (Issue 2)**:
+    - Updated `pipeline/orchestration/workflow.json` to configure both output arrays on `Check Orchestration Exit Code`:
+      - Output 0 (`exitCode == 2`): routes to `Alert QA Review Queue`.
+      - Output 1 (`exitCode != 2`): routes to `Check Execution Succeeded` IF node (`exitCode == 0`).
+    - Added `Alert Pipeline Failure` HTTP Request node attached to `Check Execution Succeeded` false branch (`exitCode != 0`, e.g. exit code 1), ensuring failures are visibly alerted and flagged.
+    - Updated `N8nWorkflowIntegrityTests` verifying 6 collapsed nodes, both branches, and HTTP request alerting.
+  - **Cold Start Integration Test (Issue 3)**:
+    - Added `test_cold_start_without_raw_video_fails_cleanly` in `pipeline/tests/test_orchestration.py`.
+    - Verified that missing raw video with no `--source` cleanly fails at stage `ingestion`, records `(message_id, "ingestion", "failed")` in state DB, dispatches an alert, halts before audio extraction, and CLI returns exit code 1.
+  - **Live PostgreSQL Advisory Lock Verification (Issue 4)**:
+    - Updated default `STATE_DATABASE_URL` in `PostgreSqlAdvisoryLockIntegrationTests` from `postgresql://quran_user:quran_pass@localhost:5432/quran_pipeline` to `postgresql://pipeline:pipeline@localhost:5432/pipeline`, aligning with `docker-compose.yml` and `.env.example`.
+    - Added dual IPv4/localhost socket reachability check in `setUpClass`.
+    - Verified non-skipped 100% pass against live PostgreSQL instance in local development environment.
 
 - **Concurrency & Race-Condition Resolutions (`pipeline/state/repository.py`, `pipeline/orchestration/runner.py`)**:
   - **Atomic Idempotency Claim (`claim_execution`)**:
@@ -56,21 +75,6 @@
   - Dynamic parameter placeholder translation (`?` $\leftrightarrow$ `%s`) preserving identical query templates and schema parity across both backends (`pipeline_items`, `pipeline_messages`).
   - Helper query methods: `fetch_all_stages()`, `fetch_latest_published_timestamp()`, `fetch_items_by_status()`.
 
-- **Production n8n Workflows (`pipeline/orchestration/`)**:
-  - `pipeline/orchestration/workflow.json`:
-    - Collapsed production workflow into a single `Run Pipeline Orchestrator` CLI node:
-      `python -m pipeline.orchestration.app {{$('Telegram Video Trigger').item.json.message.message_id}} --json`
-    - Sets `continueOnFail: true` to inspect orchestrator exit codes:
-      - Exit code 0: Clean success, skip, or scheduling deferral (pipeline completed).
-      - Exit code 2: QA Gate rejection (`held_for_review`), routed via `Check Orchestration Exit Code` IF node to `Alert QA Review Queue`.
-      - Other non-zero exit codes: Unhandled technical failure, routed to `settings.errorWorkflow = "Quran Pipeline Error Handler"`.
-    - Completely eliminates redundant per-stage executeCommand nodes and n8n re-implementation of gating logic, guaranteeing that Step 1 atomic claim, PostgreSQL advisory locks, and Step 8 publish slot rate-limit reservations are always exercised.
-  - `pipeline/orchestration/error_workflow.json`:
-    - Global catch-all error workflow capturing failure events from any node in the pipeline.
-    - Formats error context (`node`, `message_id`, `error`, `timestamp`).
-    - Updates state store to `failed`.
-    - Dispatches high-priority alert to monitoring webhook/Telegram.
-
 - **Pre-Publish Posting Window Re-Check (`pipeline/orchestration/runner.py`)**:
   - In `runner.py` Step 8, immediately before `reserve_publish_slot()`, added a re-evaluation of `self.scheduler.is_within_posting_window()`.
   - If video render takes significant duration and the posting window closes mid-render, publish is deferred, state is recorded as `scheduled`, and the claim is cleanly released rather than posting outside allowed hours.
@@ -83,14 +87,9 @@
   - Verified with `test_held_for_review_requires_force_to_retry`.
 
 - **Real PostgreSQL Advisory Lock Integration Test (`pipeline/tests/test_orchestration.py`)**:
-  - Implemented `PostgreSqlAdvisoryLockIntegrationTests` spawning dual concurrent database connections against PostgreSQL (`STATE_DATABASE_URL`, defaulting to `postgresql://quran_user:quran_pass@localhost:5432/quran_pipeline`).
+  - Implemented `PostgreSqlAdvisoryLockIntegrationTests` spawning dual concurrent database connections against live PostgreSQL (`STATE_DATABASE_URL=postgresql://pipeline:pipeline@localhost:5432/pipeline`).
   - Tests mutual exclusion using `SELECT pg_try_advisory_lock(%s)` and `SELECT pg_advisory_unlock(%s)`.
-  - **Environment Status**: In this local test environment, the PostgreSQL container was not running (port 5432 unreachable), so the test suite gracefully skipped it via `unittest.SkipTest`.
-  - **How to Run in CI / Local Docker**:
-    ```bash
-    docker compose up -d postgres
-    pytest -k PostgreSqlAdvisoryLockIntegrationTests -v
-    ```
+  - Verified passing cleanly against live PostgreSQL.
 
 - **CLI Application & Settings (`pipeline/orchestration/app.py`, `pipeline/config.py`)**:
   - Factory `build_orchestrator()` kwarg drift fixed: `CtcForcedAligner(binary=..., model=...)`, `CaptionTemplater(default_template=...)`, and `MultiPlatformPublishClient(api_base_url=...)`.
@@ -110,9 +109,9 @@
 ### Standard Library Discovery (`python -m unittest discover -s pipeline/tests -v`)
 Ran with zero external test dependencies:
 ```text
-Ran 114 tests in 5.167s
+Ran 116 tests in 8.104s
 
-OK (skipped=1)
+OK
 ```
 
 ### Pytest Full Regression Suite (`pytest -v`)
@@ -122,22 +121,24 @@ platform win32 -- Python 3.13.2, pytest-9.0.3, pluggy-1.6.0
 rootdir: C:\Users\COMPUMARTS\Desktop\Q
 configfile: pyproject.toml
 plugins: anyio-4.13.0, asyncio-1.3.0
-collected 115 items
+collected 116 items
 
 pipeline/tests/test_alignment.py ... PASSED
 pipeline/tests/test_audio.py ... PASSED
 pipeline/tests/test_ingestion.py ... PASSED
-pipeline/tests/test_orchestration.py::PostgreSqlAdvisoryLockIntegrationTests::test_real_advisory_lock_mutual_exclusion SKIPPED (PostgreSQL unreachable)
+pipeline/tests/test_orchestration.py::PostgreSqlAdvisoryLockIntegrationTests::test_real_advisory_lock_mutual_exclusion PASSED
+pipeline/tests/test_orchestration.py::PipelineOrchestratorTests::test_cold_start_without_raw_video_fails_cleanly PASSED
 pipeline/tests/test_orchestration.py::PipelineOrchestratorTests::test_posting_window_closing_during_render_blocks_publish PASSED
 pipeline/tests/test_orchestration.py::PipelineOrchestratorTests::test_held_for_review_requires_force_to_retry PASSED
 pipeline/tests/test_orchestration.py::N8nWorkflowIntegrityTests::test_main_workflow_json_structure_and_nodes PASSED
+pipeline/tests/test_orchestration.py::N8nWorkflowIntegrityTests::test_error_workflow_json_structure_and_nodes PASSED
 pipeline/tests/test_orchestration.py::PipelineDryRunIntegrationTests::test_end_to_end_dry_run_with_draft_publishing_and_idempotency PASSED
 pipeline/tests/test_publish.py ... PASSED
 pipeline/tests/test_qa_gate.py ... PASSED
 pipeline/tests/test_recognition.py ... PASSED
 pipeline/tests/test_render.py ... PASSED
 
-======================= 114 passed, 1 skipped in 7.48s ========================
+============================= 116 passed in 6.52s =============================
 ```
 
 ---

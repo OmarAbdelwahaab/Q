@@ -78,7 +78,22 @@ services:
     volumes:
       - n8n_data:/home/node/.n8n
 
+  ingestion:
+    image: python:3.11-slim
+    restart: unless-stopped
+    command: sh -c "pip install -e . && python -m pipeline.ingestion.app"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    volumes:
+      - ./:/app
+      - ./storage:/app/storage
+    working_dir: /app
+
 volumes:
   postgres_data:
   minio_data:
   n8n_data:
+

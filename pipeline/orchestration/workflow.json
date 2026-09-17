@@ -68,6 +68,44 @@
         880,
         300
       ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{$json[\"exitCode\"]}}",
+              "operation": "equal",
+              "value2": 0
+            }
+          ]
+        }
+      },
+      "id": "44444444-4444-4444-4444-444444444444",
+      "name": "Check Execution Succeeded",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        880,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.ALERT_WEBHOOK_URL}}",
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"event\": \"pipeline_failed\", \"message_id\": {{$('Telegram Video Trigger').item.json.message.message_id}}, \"exit_code\": {{$json[\"exitCode\"]}}, \"error\": \"{{$json[\"stderr\"] || $json[\"stdout\"] || 'Execution failed'}}\"}"
+      },
+      "id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+      "name": "Alert Pipeline Failure",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        1100,
+        460
+      ]
     }
   ],
   "connections": {
@@ -98,6 +136,25 @@
         [
           {
             "node": "Alert QA Review Queue",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Check Execution Succeeded",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Execution Succeeded": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Alert Pipeline Failure",
             "type": "main",
             "index": 0
           }

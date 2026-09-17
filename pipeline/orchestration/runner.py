@@ -10,6 +10,7 @@ from typing import Any, Awaitable, Callable, Protocol
 
 from pipeline.alignment.service import AlignmentService
 from pipeline.audio.service import AudioExtractionService
+from pipeline.ingestion.service import IngestionService
 from pipeline.logging import get_logger
 from pipeline.orchestration.scheduler import PostingWindowScheduler, ScheduleDecision
 from pipeline.publish.service import PublishService
@@ -62,10 +63,12 @@ class PipelineOrchestrator:
         render_service: RenderService,
         publish_service: PublishService,
         scheduler: PostingWindowScheduler | None = None,
+        ingestion_service: IngestionService | None = None,
     ) -> None:
         self.storage_root = storage_root
         self.state_repository = state_repository
         self.alert_service = alert_service
+        self.ingestion_service = ingestion_service
         self.audio_service = audio_service
         self.recognition_service = recognition_service
         self.alignment_service = alignment_service
@@ -193,11 +196,62 @@ class PipelineOrchestrator:
                 duration_seconds=round(time.monotonic() - start_time, 3),
             )
 
-        # 2. Stage: Audio Extraction
+        # 2. Stage: Ingestion
+        raw_video_path = self.storage_root / "raw" / f"{message_id}.mp4"
+        effective_source = source_path
+        if source_path:
+            source_p = Path(source_path)
+            if not source_p.exists():
+                err = f"Source video does not exist: {source_p}"
+                self.logger.error(err, extra={"message_id": message_id})
+                self.state_repository.upsert_stage(message_id, "ingestion", "failed", err)
+                self.state_repository.upsert_stage(message_id, "orchestration", "failed", err)
+                await self._alert_failure("ingestion", message_id, err)
+                stage_records["ingestion"] = {"status": "failed", "error": err}
+                return PipelineExecutionSummary(
+                    message_id=message_id,
+                    status="failed",
+                    stages=stage_records,
+                    duration_seconds=round(time.monotonic() - start_time, 3),
+                    error=err,
+                )
+            if source_p.resolve() != raw_video_path.resolve():
+                import shutil
+                raw_video_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source_p, raw_video_path)
+            self.state_repository.upsert_stage(message_id, "ingestion", "completed")
+            stage_records["ingestion"] = {
+                "status": "completed",
+                "storage_path": str(raw_video_path),
+            }
+            effective_source = raw_video_path
+        elif raw_video_path.exists() and raw_video_path.stat().st_size > 0:
+            self.state_repository.upsert_stage(message_id, "ingestion", "completed")
+            stage_records["ingestion"] = {
+                "status": "completed",
+                "storage_path": str(raw_video_path),
+            }
+            effective_source = raw_video_path
+        elif self.ingestion_service is not None:
+            err = f"Source video does not exist: {raw_video_path} and no source was provided"
+            self.logger.error(err, extra={"message_id": message_id})
+            self.state_repository.upsert_stage(message_id, "ingestion", "failed", err)
+            self.state_repository.upsert_stage(message_id, "orchestration", "failed", err)
+            await self._alert_failure("ingestion", message_id, err)
+            stage_records["ingestion"] = {"status": "failed", "error": err}
+            return PipelineExecutionSummary(
+                message_id=message_id,
+                status="failed",
+                stages=stage_records,
+                duration_seconds=round(time.monotonic() - start_time, 3),
+                error=err,
+            )
+
+        # 3. Stage: Audio Extraction
         ok, _, fail_summary = await self._run_stage(
             "audio",
             message_id,
-            self.audio_service.extract(message_id, source_path=source_path),
+            self.audio_service.extract(message_id, source_path=effective_source),
             stage_records,
             lambda r: {
                 "status": r.status,
