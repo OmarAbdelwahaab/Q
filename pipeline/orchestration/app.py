@@ -16,18 +16,15 @@ from pipeline.audio.service import AudioExtractionService
 from pipeline.config import (
     AlignmentSettings,
     AudioSettings,
-    IngestionSettings,
     OrchestrationSettings,
     PublishSettings,
     QAGateSettings,
     RecognitionSettings,
     RenderSettings,
 )
-from pipeline.ingestion.service import IngestionService
 from pipeline.logging import configure_logging, get_logger
 from pipeline.orchestration.runner import PipelineOrchestrator
 from pipeline.orchestration.scheduler import PostingWindowScheduler
-from pipeline.storage import LocalArtifactStorage
 from pipeline.publish.client import MultiPlatformPublishClient, StubPublishClient
 from pipeline.publish.service import PublishService
 from pipeline.publish.templating import CaptionTemplater
@@ -82,7 +79,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--force",
         action="store_true",
         default=False,
-        help="Force execution even if an active claim or previous state exists",
+        help="Override held_for_review status or stale (>300s) processing claims for retry",
+    )
+    parser.add_argument(
+        "--force-active",
+        action="store_true",
+        default=False,
+        help="Force override of even fresh active processing claims (use with caution)",
     )
     parser.add_argument(
         "--json",
@@ -108,17 +111,6 @@ def build_orchestrator(
         webhook_url=orch_settings.alert_webhook_url,
         telegram_bot_token=orch_settings.alert_telegram_bot_token,
         telegram_chat_id=orch_settings.alert_telegram_chat_id,
-    )
-
-    # Ingestion Stage
-    ingestion_settings = IngestionSettings.from_env()
-    storage = LocalArtifactStorage(orch_settings.storage_root)
-    ingestion_service = IngestionService(
-        storage=storage,
-        state_repository=state_repo,
-        alert_service=alert_service,
-        retry_attempts=ingestion_settings.retry_attempts,
-        retry_backoff_seconds=ingestion_settings.retry_backoff_seconds,
     )
 
     # Audio Stage
@@ -264,7 +256,6 @@ def build_orchestrator(
         render_service=render_service,
         publish_service=publish_service,
         scheduler=scheduler,
-        ingestion_service=ingestion_service,
     )
 
     return orchestrator, state_repo
@@ -286,6 +277,7 @@ async def main(argv: list[str] | None = None) -> int:
         enforce_scheduler=not args.skip_scheduler,
         wait_for_window=args.wait_for_window,
         force=args.force,
+        force_active=args.force_active,
     )
 
     if args.json:

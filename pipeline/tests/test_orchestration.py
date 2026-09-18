@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+from contextlib import closing
 import json
 import os
 import tempfile
@@ -271,10 +272,15 @@ class PipelineStateRepositoryTests(unittest.TestCase):
             self.assertFalse(claimed2)
             self.assertEqual(reason2, "active_execution")
 
-            # 3. Second claim with force=True succeeds
+            # 3. Second claim with force=True alone on fresh active claim is refused
             claimed3, reason3 = repo.claim_execution(101, force=True)
-            self.assertTrue(claimed3)
-            self.assertEqual(reason3, "claimed")
+            self.assertFalse(claimed3)
+            self.assertEqual(reason3, "active_execution_recent")
+
+            # 4. Second claim with force=True and force_active=True succeeds
+            claimed4, reason4 = repo.claim_execution(101, force=True, force_active=True)
+            self.assertTrue(claimed4)
+            self.assertEqual(reason4, "claimed")
 
             # 4. If publish stage is completed, claim fails with already_completed
             repo.upsert_stage(101, "publish", "completed")
@@ -282,11 +288,47 @@ class PipelineStateRepositoryTests(unittest.TestCase):
             self.assertFalse(claimed4)
             self.assertEqual(reason4, "already_completed")
 
-            # 5. If orchestration stage itself was completed, claim fails
+            # 6. If orchestration stage itself was completed, claim fails
             repo.upsert_stage(102, "orchestration", "completed")
             claimed5, reason5 = repo.claim_execution(102, force=False)
             self.assertFalse(claimed5)
             self.assertEqual(reason5, "already_completed")
+
+    def test_claim_execution_force_semantics(self) -> None:
+        """Verify Task 2 requirements:
+        (1) --force still overrides a stale 'processing' claim.
+        (2) --force alone does NOT override a fresh 'processing' claim.
+        (3) --force combined with force_active overrides a fresh 'processing' claim.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = PipelineStateRepository(database_path=Path(temp_dir) / "state.db")
+
+            # Create fresh processing claim
+            repo.claim_execution(501)
+
+            # (2) --force alone does NOT override fresh processing claim
+            claimed_fresh, reason_fresh = repo.claim_execution(501, force=True, force_active=False)
+            self.assertFalse(claimed_fresh)
+            self.assertEqual(reason_fresh, "active_execution_recent")
+
+            # (3) --force combined with force_active DOES override fresh processing claim
+            claimed_active, reason_active = repo.claim_execution(501, force=True, force_active=True)
+            self.assertTrue(claimed_active)
+            self.assertEqual(reason_active, "claimed")
+
+            # Manually backdate updated_at past 300s (e.g. 400 seconds ago)
+            stale_time = (datetime.now(timezone.utc) - timedelta(seconds=400)).strftime("%Y-%m-%d %H:%M:%S")
+            with closing(repo._connect()) as conn:
+                conn.execute(
+                    "UPDATE pipeline_items SET updated_at = ? WHERE message_id = 501 AND stage = 'orchestration'",
+                    (stale_time,),
+                )
+                conn.commit()
+
+            # (1) --force alone DOES override a stale 'processing' claim
+            claimed_stale, reason_stale = repo.claim_execution(501, force=True, force_active=False)
+            self.assertTrue(claimed_stale)
+            self.assertEqual(reason_stale, "claimed")
 
     def test_reserve_publish_slot_lifecycle(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -319,6 +361,47 @@ class PipelineStateRepositoryTests(unittest.TestCase):
             reserved_zero, wait_zero, reason_zero = repo.reserve_publish_slot(203, min_interval_seconds=0)
             self.assertTrue(reserved_zero)
             self.assertEqual(wait_zero, 0.0)
+
+    def test_reserve_publish_slot_cleans_up_stale_processing_reservation(self) -> None:
+        """Verify Task 3: when reservation exceeds timeout, superseding reservation marks original as failed."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = PipelineStateRepository(database_path=Path(temp_dir) / "state.db")
+
+            # 1. Message 301 reserves publish slot
+            reserved1, wait1, reason1 = repo.reserve_publish_slot(
+                301, min_interval_seconds=1800, reservation_timeout_seconds=300
+            )
+            self.assertTrue(reserved1)
+            row_301 = repo.fetch_stage(301, "publish")
+            self.assertIsNotNone(row_301)
+            self.assertEqual(row_301["status"], "processing")
+
+            # 2. Backdate message 301's updated_at past reservation_timeout_seconds (e.g. 400s ago)
+            stale_time = (datetime.now(timezone.utc) - timedelta(seconds=400)).strftime("%Y-%m-%d %H:%M:%S")
+            with closing(repo._connect()) as conn:
+                conn.execute(
+                    "UPDATE pipeline_items SET updated_at = ? WHERE message_id = 301 AND stage = 'publish'",
+                    (stale_time,),
+                )
+                conn.commit()
+
+            # 3. Message 302 triggers a new reservation
+            reserved2, wait2, reason2 = repo.reserve_publish_slot(
+                302, min_interval_seconds=1800, reservation_timeout_seconds=300
+            )
+            self.assertTrue(reserved2)
+            self.assertEqual(reason2, "reserved")
+
+            # 4. Assert original message 301's status is now 'failed', not orphaned 'processing'
+            row_301_after = repo.fetch_stage(301, "publish")
+            self.assertIsNotNone(row_301_after)
+            self.assertEqual(row_301_after["status"], "failed")
+            self.assertIn("presumed crashed worker", row_301_after["error"] or "")
+
+            # 5. Message 302 is successfully 'processing'
+            row_302 = repo.fetch_stage(302, "publish")
+            self.assertIsNotNone(row_302)
+            self.assertEqual(row_302["status"], "processing")
 
     def test_connection_pool_and_close(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -532,7 +615,7 @@ class PipelineOrchestratorTests(unittest.TestCase):
         # Seed dummy raw video files so mock tests pass the ingestion stage check
         self.raw_dir = self.storage_root / "raw"
         self.raw_dir.mkdir(parents=True, exist_ok=True)
-        for mid in (201, 302, 303, 304, 305, 402, 888, 901, 902, 950, 960):
+        for mid in (201, 302, 303, 304, 305, 402, 888, 901, 902, 950, 960, 970, 971):
             (self.raw_dir / f"{mid}.mp4").write_bytes(b"mock video data")
 
         # Mock stage services
@@ -1016,6 +1099,59 @@ class PipelineOrchestratorTests(unittest.TestCase):
             code = asyncio.run(cli_main([str(msg_id), "--json"]))
             self.assertEqual(code, 1)
 
+    def test_orchestrator_force_active_execution_behavior(self) -> None:
+        """Verify orchestrator respects safe force semantics on active execution."""
+        msg_id = 970
+        self.mock_audio.extract = AsyncMock(return_value=AudioExtractionResult(msg_id, "completed", None, None))
+        self.mock_recognition.recognize = AsyncMock(return_value=RecognitionResult(msg_id, "completed", None, None))
+        self.mock_alignment.align = AsyncMock(return_value=AlignmentResult(msg_id, "completed", None, 1.0))
+        self.mock_qa_gate.evaluate = AsyncMock(return_value=QAGateResult(msg_id, "approved", True))
+        self.mock_render.render = AsyncMock(return_value=RenderResult(msg_id, "completed", None, 10.0))
+        self.mock_publish.publish = AsyncMock(return_value=PublishExecutionResult(msg_id, "completed", None))
+
+        # 1. Message is actively processing (fresh)
+        self.state_repo.upsert_stage(msg_id, "orchestration", "processing")
+
+        # 2. force=True without force_active -> skipped_active_execution
+        summary_force = asyncio.run(
+            self.orchestrator.run(message_id=msg_id, force=True, force_active=False)
+        )
+        self.assertEqual(summary_force.status, "skipped_active_execution")
+        self.assertIn("actively processing", summary_force.error or "")
+        self.mock_audio.extract.assert_not_called()
+
+        # 3. force=True with force_active=True -> successfully runs and completes
+        summary_force_active = asyncio.run(
+            self.orchestrator.run(message_id=msg_id, force=True, force_active=True)
+        )
+        self.assertEqual(summary_force_active.status, "completed")
+        self.mock_audio.extract.assert_awaited_once()
+
+        # 4. Another message with stale claim -> force=True alone succeeds
+        msg_id_stale = 971
+        self.mock_audio.extract.reset_mock()
+        self.mock_audio.extract = AsyncMock(return_value=AudioExtractionResult(msg_id_stale, "completed", None, None))
+        self.mock_recognition.recognize = AsyncMock(return_value=RecognitionResult(msg_id_stale, "completed", None, None))
+        self.mock_alignment.align = AsyncMock(return_value=AlignmentResult(msg_id_stale, "completed", None, 1.0))
+        self.mock_qa_gate.evaluate = AsyncMock(return_value=QAGateResult(msg_id_stale, "approved", True))
+        self.mock_render.render = AsyncMock(return_value=RenderResult(msg_id_stale, "completed", None, 10.0))
+        self.mock_publish.publish = AsyncMock(return_value=PublishExecutionResult(msg_id_stale, "completed", None))
+
+        self.state_repo.upsert_stage(msg_id_stale, "orchestration", "processing")
+        stale_time = (datetime.now(timezone.utc) - timedelta(seconds=400)).strftime("%Y-%m-%d %H:%M:%S")
+        with closing(self.state_repo._connect()) as conn:
+            conn.execute(
+                "UPDATE pipeline_items SET updated_at = ? WHERE message_id = ? AND stage = 'orchestration'",
+                (stale_time, msg_id_stale),
+            )
+            conn.commit()
+
+        summary_stale = asyncio.run(
+            self.orchestrator.run(message_id=msg_id_stale, force=True, force_active=False)
+        )
+        self.assertEqual(summary_stale.status, "completed")
+        self.mock_audio.extract.assert_awaited_once()
+
 
 
 
@@ -1172,12 +1308,13 @@ class N8nWorkflowIntegrityTests(unittest.TestCase):
 
 class OrchestrationCLITests(unittest.TestCase):
     def test_cli_argument_parsing(self) -> None:
-        args = parse_args(["505", "--draft", "--skip-scheduler", "--wait-for-window", "--force", "--json"])
+        args = parse_args(["505", "--draft", "--skip-scheduler", "--wait-for-window", "--force", "--force-active", "--json"])
         self.assertEqual(args.message_id, 505)
         self.assertTrue(args.draft)
         self.assertTrue(args.skip_scheduler)
         self.assertTrue(args.wait_for_window)
         self.assertTrue(args.force)
+        self.assertTrue(args.force_active)
         self.assertTrue(args.json)
 
     def test_orchestration_settings_from_env(self) -> None:

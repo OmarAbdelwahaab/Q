@@ -10,7 +10,6 @@ from typing import Any, Awaitable, Callable, Protocol
 
 from pipeline.alignment.service import AlignmentService
 from pipeline.audio.service import AudioExtractionService
-from pipeline.ingestion.service import IngestionService
 from pipeline.logging import get_logger
 from pipeline.orchestration.scheduler import PostingWindowScheduler, ScheduleDecision
 from pipeline.publish.service import PublishService
@@ -63,12 +62,10 @@ class PipelineOrchestrator:
         render_service: RenderService,
         publish_service: PublishService,
         scheduler: PostingWindowScheduler | None = None,
-        ingestion_service: IngestionService | None = None,
     ) -> None:
         self.storage_root = storage_root
         self.state_repository = state_repository
         self.alert_service = alert_service
-        self.ingestion_service = ingestion_service
         self.audio_service = audio_service
         self.recognition_service = recognition_service
         self.alignment_service = alignment_service
@@ -136,6 +133,7 @@ class PipelineOrchestrator:
         wait_for_window: bool = False,
         sleep_fn: Callable[[float], Awaitable[None]] | None = None,
         force: bool = False,
+        force_active: bool = False,
     ) -> PipelineExecutionSummary:
         """Execute the end-to-end pipeline for the specified message_id."""
         start_time = time.monotonic()
@@ -163,7 +161,7 @@ class PipelineOrchestrator:
                 )
 
         claimed, claim_reason = self.state_repository.claim_execution(
-            message_id, stage="orchestration", force=force
+            message_id, stage="orchestration", force=force, force_active=force_active
         )
         if not claimed:
             pub_stage = self.state_repository.fetch_stage(message_id, "publish")
@@ -178,6 +176,18 @@ class PipelineOrchestrator:
                     stages={"publish": pub_stage} if pub_stage else {},
                     duration_seconds=round(time.monotonic() - start_time, 3),
                     error="Execution blocked: message is held_for_review (use --force to override)",
+                )
+            if claim_reason == "active_execution_recent":
+                self.logger.warning(
+                    "Execution blocked: message is actively processing by another worker (use --force-active with --force to override)",
+                    extra={"message_id": message_id, "reason": claim_reason, "status": "skipped_active_execution"},
+                )
+                return PipelineExecutionSummary(
+                    message_id=message_id,
+                    status="skipped_active_execution",
+                    stages={"publish": pub_stage} if pub_stage else {},
+                    duration_seconds=round(time.monotonic() - start_time, 3),
+                    error="Execution blocked: message is actively processing by another worker (use --force-active with --force to override)",
                 )
 
             status_label = (

@@ -33,7 +33,22 @@ class _PooledConnectionWrapper:
 
 
 class PipelineStateRepository:
-    """Persist stage status rows in SQLite (default/local) or PostgreSQL (multi-container)."""
+    """Persist stage status rows in SQLite (default/local) or PostgreSQL (multi-container).
+
+    Backend Concurrency & Known Limitations:
+      - SQLite (default/local): Uses 'BEGIN IMMEDIATE' for critical claim and reservation
+        transactions (claim_execution, reserve_publish_slot). This acquires a write lock
+        on the entire database file, meaning concurrent operations for DIFFERENT message_ids
+        will serialize rather than executing in parallel. This is completely suitable for
+        local development, CLI invocations, and single-worker test suites per ADR 001.
+      - PostgreSQL (multi-container / production): Uses per-key advisory transaction locks
+        ('SELECT pg_advisory_xact_lock(...)') scoped to specific message IDs or global rate
+        slots. This avoids whole-database locking and allows parallel pipeline execution
+        across multiple worker processes or containers. PostgreSQL should always be used
+        for deployments requiring multi-worker concurrency throughput.
+
+    See docs/decisions/001-state-database-strategy.md for architecture details.
+    """
 
     def __init__(
         self,
@@ -356,13 +371,18 @@ class PipelineStateRepository:
         message_id: int,
         stage: str = "orchestration",
         force: bool = False,
+        force_active: bool = False,
+        stale_threshold_seconds: int = 300,
     ) -> tuple[bool, str]:
         """Atomically claim pipeline execution token for message_id to prevent concurrent races.
 
         Returns (claimed, reason):
           - (True, "claimed") if execution token was successfully acquired
           - (False, "already_completed") if the item has already completed publishing
+          - (False, "held_for_review") if the item was held for review (requires force=True to retry)
           - (False, "active_execution") if another worker is currently processing this message
+          - (False, "active_execution_recent") if another worker claimed this message recently
+            (<stale_threshold_seconds); requires force_active=True to override
         """
         with closing(self._connect()) as conn:
             try:
@@ -391,21 +411,34 @@ class PipelineStateRepository:
 
                 # 2. Check existing claim stage status
                 sql_stage = self._format_sql(
-                    "SELECT status FROM pipeline_items WHERE message_id = ? AND stage = ?"
+                    "SELECT status, updated_at FROM pipeline_items WHERE message_id = ? AND stage = ?"
                 )
                 cur.execute(sql_stage, (message_id, stage))
                 stage_row = cur.fetchone()
                 if stage_row:
                     status = stage_row[0] if isinstance(stage_row, (tuple, list)) else stage_row["status"]
+                    updated_at_val = stage_row[1] if isinstance(stage_row, (tuple, list)) else stage_row["updated_at"]
+                    claim_dt = self._parse_datetime(updated_at_val)
+
                     if status == "completed" and not force:
                         conn.commit()
                         return False, "already_completed"
                     if status == "held_for_review" and not force:
                         conn.commit()
                         return False, "held_for_review"
-                    if status == "processing" and not force:
-                        conn.commit()
-                        return False, "active_execution"
+                    if status == "processing":
+                        if not force and not force_active:
+                            conn.commit()
+                            return False, "active_execution"
+                        # force or force_active is True: check staleness
+                        is_stale = False
+                        if claim_dt is not None:
+                            elapsed = (datetime.now(timezone.utc) - claim_dt).total_seconds()
+                            if elapsed >= stale_threshold_seconds:
+                                is_stale = True
+                        if not is_stale and not force_active:
+                            conn.commit()
+                            return False, "active_execution_recent"
 
                 # Also check if qa_gate was held_for_review
                 if not force and stage != "qa_gate":
@@ -497,7 +530,7 @@ class PipelineStateRepository:
                 # 2. Check latest publication or active reservation across other messages
                 sql_latest = self._format_sql(
                     """
-                    SELECT status, updated_at
+                    SELECT message_id, status, updated_at
                     FROM pipeline_items
                     WHERE stage = ? AND status IN (?, ?) AND message_id != ?
                     ORDER BY updated_at DESC
@@ -508,25 +541,47 @@ class PipelineStateRepository:
                 row = cur.fetchone()
                 last_dt = None
                 last_status = None
+                last_msg_id = None
                 if row:
-                    last_status = row[0] if isinstance(row, (tuple, list)) else row["status"]
-                    res = row[1] if isinstance(row, (tuple, list)) else row["updated_at"]
+                    last_msg_id = row[0] if isinstance(row, (tuple, list)) else row["message_id"]
+                    last_status = row[1] if isinstance(row, (tuple, list)) else row["status"]
+                    res = row[2] if isinstance(row, (tuple, list)) else row["updated_at"]
                     last_dt = self._parse_datetime(res)
 
-                if last_dt is not None and min_interval_seconds > 0:
+                if last_dt is not None:
                     now_dt = datetime.now(timezone.utc)
                     elapsed = (now_dt - last_dt).total_seconds()
                     # An active 'processing' reservation expires after reservation_timeout_seconds (default 300s)
                     # to prevent a dead/crashed worker from blocking the rate limit slot indefinitely.
-                    effective_interval = (
-                        min_interval_seconds
-                        if last_status == "completed"
-                        else min(min_interval_seconds, reservation_timeout_seconds)
-                    )
-                    remaining = effective_interval - elapsed
-                    if remaining > 0:
-                        conn.commit()
-                        return False, remaining, f"Rate limit active: must wait {remaining:.1f}s"
+                    if min_interval_seconds > 0:
+                        effective_interval = (
+                            min_interval_seconds
+                            if last_status == "completed"
+                            else min(min_interval_seconds, reservation_timeout_seconds)
+                        )
+                        remaining = effective_interval - elapsed
+                        if remaining > 0:
+                            conn.commit()
+                            return False, remaining, f"Rate limit active: must wait {remaining:.1f}s"
+
+                    # If the latest other row was an active 'processing' reservation that expired,
+                    # explicitly mark that orphaned row as failed in this same atomic transaction.
+                    if (
+                        last_status == "processing"
+                        and elapsed >= reservation_timeout_seconds
+                        and last_msg_id is not None
+                    ):
+                        stale_err = f"Reservation expired after {int(elapsed)}s, presumed crashed worker"
+                        sql_fail_stale = self._format_sql(
+                            """
+                            UPDATE pipeline_items
+                            SET status = 'failed',
+                                error = ?,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE message_id = ? AND stage = ? AND status = 'processing'
+                            """
+                        )
+                        cur.execute(sql_fail_stale, (stale_err, last_msg_id, "publish"))
 
                 # 3. Reserve slot atomically by marking publish stage 'processing'
                 sql_reserve = self._format_sql(

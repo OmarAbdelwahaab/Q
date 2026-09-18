@@ -35,3 +35,10 @@ All phases up to Phase 5 have used `PipelineStateRepository` with SQLite for loc
 - No breaking changes for Phases 1–7 services or existing tests.
 - Local tests remain fast, deterministic, and self-contained without Docker prerequisites.
 - Clear contract established for Phase 8 orchestration to switch to PostgreSQL.
+
+## Known Limitations
+
+### SQLite Single-Writer File Locking
+- **Whole-File Serialization**: The SQLite backend serializes concurrent `claim_execution` and `reserve_publish_slot` transactions by executing `BEGIN IMMEDIATE`, which acquires an exclusive write lock on the entire database file.
+- **Concurrency Impact**: While SQLite permits concurrent reads in WAL mode, concurrent write/claim operations for *different* `message_id` items will block and execute serially rather than in parallel.
+- **Operational Guidance**: This file-level serialization is intentional and acceptable for local service development, single-worker CLI runs, and fast ephemeral unit/integration test suites (Phases 1–7). For multi-worker deployments, scheduled burst processing, or multi-container n8n workflows (Phase 8+), PostgreSQL (`STATE_DATABASE_URL`) **must** be used, as it utilizes fine-grained transaction advisory locks (`pg_advisory_xact_lock`) scoped per message ID rather than locking the entire database.
