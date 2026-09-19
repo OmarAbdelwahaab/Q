@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
+from pathlib import Path
 from typing import Sequence
 
 from pipeline.alerts import CompositeAlertService
@@ -79,8 +81,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def build_monitor(settings: MonitoringSettings | None = None) -> PipelineMonitor:
     """Construct PipelineMonitor from settings and state database."""
+    state_db_path = os.getenv("STATE_DB_PATH")
     mon_settings = settings or MonitoringSettings.from_env()
-    if mon_settings.state_database_url:
+
+    if state_db_path:
+        # Use the explicitly requested SQLite database.
+        # Ignore the inherited STATE_DATABASE_URL for this invocation.
+        state_repo = PipelineStateRepository(database_path=Path(state_db_path).resolve())
+    elif mon_settings.state_database_url:
+        # Use the configured PostgreSQL/database URL.
         state_repo = PipelineStateRepository(database_url=mon_settings.state_database_url)
     else:
         state_repo = PipelineStateRepository(database_path=mon_settings.state_db_path)

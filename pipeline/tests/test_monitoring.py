@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import tempfile
@@ -360,6 +361,86 @@ class MonitoringCLITests(unittest.IsolatedAsyncioTestCase):
             self.repo.upsert_stage(999, "orchestration", "failed", error="Fatal error")
             code_breach = await cli_main(["check", "--failure-threshold", "1"])
             self.assertEqual(code_breach, 2)
+
+
+class DatabasePrecedenceTests(unittest.TestCase):
+    """Test database selection and precedence between STATE_DB_PATH and STATE_DATABASE_URL."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.temp_dir.name) / "precedence.db"
+
+    def tearDown(self) -> None:
+        try:
+            self.temp_dir.cleanup()
+        except Exception:
+            pass
+
+    def test_state_db_path_overrides_state_database_url_in_settings(self) -> None:
+        """When STATE_DB_PATH is explicitly set, STATE_DATABASE_URL is ignored."""
+        env = {
+            "STATE_DB_PATH": str(self.db_path),
+            "STATE_DATABASE_URL": "postgresql://pipeline:pipeline@localhost:5432/pipeline",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            settings = MonitoringSettings.from_env()
+            self.assertEqual(settings.state_db_path, self.db_path.resolve())
+            self.assertIsNone(settings.state_database_url)
+
+    def test_state_database_url_preserved_when_state_db_path_unset(self) -> None:
+        """When STATE_DB_PATH is not set, STATE_DATABASE_URL is preserved."""
+        env = {
+            "STATE_DATABASE_URL": "postgresql://pipeline:pipeline@localhost:5432/pipeline",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            settings = MonitoringSettings.from_env()
+            self.assertEqual(
+                settings.state_database_url,
+                "postgresql://pipeline:pipeline@localhost:5432/pipeline",
+            )
+
+    def test_build_monitor_prefers_explicit_state_db_path(self) -> None:
+        """build_monitor uses SQLite repo at STATE_DB_PATH even if STATE_DATABASE_URL is in env."""
+        env = {
+            "STATE_DB_PATH": str(self.db_path),
+            "STATE_DATABASE_URL": "postgresql://pipeline:pipeline@localhost:5432/pipeline",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            monitor = build_monitor()
+            try:
+                self.assertEqual(monitor.state_repo.backend, "sqlite")
+                self.assertEqual(monitor.state_repo.database_path, self.db_path.resolve())
+            finally:
+                monitor.state_repo.close()
+
+    def test_cli_main_with_both_env_vars_set(self) -> None:
+        """cli_main reads SQLite when both STATE_DB_PATH and STATE_DATABASE_URL are in env."""
+        repo = PipelineStateRepository(database_path=self.db_path)
+        try:
+            repo.upsert_stage(1, "publish", "completed")
+            env = {
+                "STATE_DB_PATH": str(self.db_path),
+                "STATE_DATABASE_URL": "postgresql://pipeline:pipeline@localhost:5432/pipeline",
+            }
+            with patch.dict("os.environ", env, clear=True):
+                # Verify report runs without attempting Postgres connection
+                json_buf = io.StringIO()
+                with patch("sys.stdout", json_buf):
+                    code = asyncio.run(cli_main(["report", "--json"]))
+                self.assertEqual(code, 0)
+                data = json.loads(json_buf.getvalue())
+                self.assertEqual(data["total_messages"], 1)
+
+                # Verify check runs cleanly without attempting Postgres connection
+                code_check = asyncio.run(cli_main(["check"]))
+                self.assertEqual(code_check, 0)
+
+                # Verify breach detection with threshold 1 after adding failure
+                repo.upsert_stage(999, "orchestration", "failed", error="Failure in test")
+                code_breach = asyncio.run(cli_main(["check", "--failure-threshold", "1"]))
+                self.assertEqual(code_breach, 2)
+        finally:
+            repo.close()
 
 
 if __name__ == "__main__":

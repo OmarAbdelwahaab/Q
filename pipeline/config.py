@@ -430,10 +430,16 @@ class MonitoringSettings:
     @classmethod
     def from_env(cls) -> "MonitoringSettings":
         project_root = Path(os.getenv("PIPELINE_PROJECT_ROOT", Path.cwd()))
-        state_db_path = Path(
-            os.getenv("STATE_DB_PATH", str(project_root / "pipeline" / "state" / "pipeline.db"))
-        ).resolve()
-        state_database_url = os.getenv("STATE_DATABASE_URL") or None
+        raw_state_db_path = os.getenv("STATE_DB_PATH")
+        if raw_state_db_path:
+            # Explicit STATE_DB_PATH override takes precedence for local CLI and tests
+            state_db_path = Path(raw_state_db_path).resolve()
+            state_database_url = None
+        else:
+            state_db_path = Path(
+                project_root / "pipeline" / "state" / "pipeline.db"
+            ).resolve()
+            state_database_url = os.getenv("STATE_DATABASE_URL") or None
 
         failure_threshold = _read_int("MONITORING_FAILURE_THRESHOLD", 3)
         if failure_threshold is None or failure_threshold <= 0:
