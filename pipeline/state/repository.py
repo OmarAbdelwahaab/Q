@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -637,5 +637,185 @@ class PipelineStateRepository:
             except Exception:
                 conn.rollback()
                 raise
+
+    def get_pipeline_summary(self, window_hours: int | None = None) -> dict[str, Any]:
+        """Return high-level pipeline metrics and breakdown by stage and status."""
+        since_dt = None
+        if window_hours is not None:
+            since_dt = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+
+        sql = self._format_sql(
+            """
+            SELECT message_id, stage, status, updated_at
+            FROM pipeline_items
+            """
+        )
+        with closing(self._connect()) as conn:
+            cur = conn.cursor()
+            cur.execute(sql)
+            rows = cur.fetchall()
+
+            total_messages_set: set[int] = set()
+            stages_breakdown: dict[str, dict[str, int]] = {}
+            review_queue_count = 0
+            active_processing_count = 0
+            latest_published_at = None
+
+            for r in rows:
+                try:
+                    mid = r[0]
+                    stg = r[1]
+                    status = r[2]
+                    up_val = r[3]
+                except (IndexError, TypeError):
+                    mid = r["message_id"]
+                    stg = r["stage"]
+                    status = r["status"]
+                    up_val = r["updated_at"]
+                dt = self._parse_datetime(up_val)
+
+                if since_dt is not None and dt is not None and dt < since_dt:
+                    continue
+
+                total_messages_set.add(mid)
+
+                stage_dict = stages_breakdown.setdefault(stg, {})
+                stage_dict[status] = stage_dict.get(status, 0) + 1
+
+                if stg == "qa_gate" and status == "held_for_review":
+                    review_queue_count += 1
+                if status == "processing":
+                    active_processing_count += 1
+                if stg == "publish" and status == "completed":
+                    if dt is not None and (latest_published_at is None or dt > latest_published_at):
+                        latest_published_at = dt
+
+            if latest_published_at is None:
+                latest_published_at = self.fetch_latest_published_timestamp()
+
+            return {
+                "window_hours": window_hours,
+                "total_messages": len(total_messages_set),
+                "stages": stages_breakdown,
+                "review_queue_count": review_queue_count,
+                "active_processing_count": active_processing_count,
+                "latest_published_at": latest_published_at,
+            }
+
+    def fetch_recent_failures(
+        self, limit: int = 10, window_hours: int | None = None
+    ) -> list[dict[str, Any]]:
+        """Return the most recent failed pipeline stages with error diagnostics."""
+        since_dt = None
+        if window_hours is not None:
+            since_dt = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+
+        sql = self._format_sql(
+            """
+            SELECT message_id, stage, status, error, created_at, updated_at
+            FROM pipeline_items
+            WHERE status = ?
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """
+        )
+        with closing(self._connect()) as conn:
+            cur = conn.cursor()
+            cur.execute(sql, ("failed", limit if since_dt is None else limit * 5))
+            rows = cur.fetchall()
+            results = []
+            for r in rows:
+                d = self._row_to_dict(cur, r)
+                if not d:
+                    continue
+                dt = self._parse_datetime(d.get("updated_at"))
+                if since_dt is not None and dt is not None and dt < since_dt:
+                    continue
+                d["updated_at_dt"] = dt
+                results.append(d)
+                if len(results) >= limit:
+                    break
+            return results
+
+    def count_consecutive_failures(self, limit: int = 10) -> int:
+        """Return the number of consecutive failed pipeline items from most recent."""
+        sql = self._format_sql(
+            """
+            SELECT message_id, status, updated_at
+            FROM pipeline_items
+            WHERE stage = ?
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """
+        )
+        with closing(self._connect()) as conn:
+            cur = conn.cursor()
+            cur.execute(sql, ("orchestration", limit))
+            rows = cur.fetchall()
+            if not rows:
+                cur.execute(
+                    self._format_sql(
+                        """
+                        SELECT message_id, status, updated_at
+                        FROM pipeline_items
+                        ORDER BY updated_at DESC
+                        LIMIT ?
+                        """
+                    ),
+                    (limit * 2,),
+                )
+                rows = cur.fetchall()
+
+            seen_ids: set[int] = set()
+            consecutive = 0
+            for r in rows:
+                try:
+                    mid = r[0]
+                    st = r[1]
+                except (IndexError, TypeError):
+                    mid = r["message_id"]
+                    st = r["status"]
+
+                if mid in seen_ids:
+                    continue
+                seen_ids.add(mid)
+                if st == "failed":
+                    consecutive += 1
+                else:
+                    break
+            return consecutive
+
+    def fetch_review_queue_count(self) -> int:
+        """Return total count of items currently held for review in qa_gate."""
+        sql = self._format_sql(
+            "SELECT COUNT(*) FROM pipeline_items WHERE stage = ? AND status = ?"
+        )
+        with closing(self._connect()) as conn:
+            cur = conn.cursor()
+            cur.execute(sql, ("qa_gate", "held_for_review"))
+            row = cur.fetchone()
+            if not row:
+                return 0
+            try:
+                return int(row[0])
+            except (IndexError, TypeError, KeyError):
+                return int(row["count"])
+
+    def fetch_review_queue_items(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Return items currently held in qa_gate review queue ordered by updated_at DESC."""
+        sql = self._format_sql(
+            """
+            SELECT message_id, stage, status, error, created_at, updated_at
+            FROM pipeline_items
+            WHERE stage = ? AND status = ?
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """
+        )
+        with closing(self._connect()) as conn:
+            cur = conn.cursor()
+            cur.execute(sql, ("qa_gate", "held_for_review", limit))
+            rows = cur.fetchall()
+            return [d for r in rows if (d := self._row_to_dict(cur, r)) is not None]
 
 

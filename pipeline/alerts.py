@@ -38,6 +38,19 @@ class AlertService(Protocol):
     async def send_publish_failure(self, message: str) -> None:
         """Send an alert for a multi-platform publishing failure."""
 
+    async def send_orchestration_failure(self, message: str) -> None:
+        """Send an alert for a pipeline orchestration failure."""
+
+    async def send_monitoring_alert(
+        self, message: str, payload: dict[str, object] | None = None
+    ) -> None:
+        """Send an alert for system monitoring issues (repeated failures or backlog)."""
+
+    async def send_status_report(
+        self, message: str, payload: dict[str, object] | None = None
+    ) -> None:
+        """Send a periodic or on-demand pipeline status report."""
+
 
 class CompositeAlertService:
     """Dispatch alerts to any configured channels and always log them."""
@@ -79,11 +92,30 @@ class CompositeAlertService:
     async def send_publish_failure(self, message: str) -> None:
         self._dispatch("publish_failure", message)
 
+    async def send_orchestration_failure(self, message: str) -> None:
+        self._dispatch("orchestration_failure", message)
+
+    async def send_monitoring_alert(
+        self, message: str, payload: dict[str, object] | None = None
+    ) -> None:
+        self._dispatch("monitoring_alert", message, extra_payload=payload)
+
+    async def send_status_report(
+        self, message: str, payload: dict[str, object] | None = None
+    ) -> None:
+        self._dispatch("status_report", message, extra_payload=payload, level="info")
 
     def _dispatch(
-        self, event: str, message: str, extra_payload: dict[str, object] | None = None
+        self,
+        event: str,
+        message: str,
+        extra_payload: dict[str, object] | None = None,
+        level: str = "error",
     ) -> None:
-        self.logger.error("Pipeline failure alert triggered", extra={"event": event, "alert_message": message})
+        if level == "info":
+            self.logger.info("Pipeline monitoring report dispatched", extra={"event": event, "alert_message": message})
+        else:
+            self.logger.error("Pipeline failure alert triggered", extra={"event": event, "alert_message": message})
 
         if self.webhook_url:
             data: dict[str, object] = {"text": message, "event": event}

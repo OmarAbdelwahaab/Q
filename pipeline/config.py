@@ -412,3 +412,58 @@ class OrchestrationSettings:
         )
 
 
+@dataclass(slots=True)
+class MonitoringSettings:
+    """Settings for pipeline monitoring, health checks, and backlog alerting."""
+
+    state_db_path: Path
+    state_database_url: str | None = None
+    failure_threshold: int = 3
+    backlog_threshold: int = 5
+    window_hours: int = 24
+    alert_cooldown_seconds: int = 3600
+    alert_webhook_url: str | None = None
+    alert_telegram_bot_token: str | None = None
+    alert_telegram_chat_id: str | None = None
+    log_level: str = "INFO"
+
+    @classmethod
+    def from_env(cls) -> "MonitoringSettings":
+        project_root = Path(os.getenv("PIPELINE_PROJECT_ROOT", Path.cwd()))
+        state_db_path = Path(
+            os.getenv("STATE_DB_PATH", str(project_root / "pipeline" / "state" / "pipeline.db"))
+        ).resolve()
+        state_database_url = os.getenv("STATE_DATABASE_URL") or None
+
+        failure_threshold = _read_int("MONITORING_FAILURE_THRESHOLD", 3)
+        if failure_threshold is None or failure_threshold <= 0:
+            failure_threshold = 3
+
+        backlog_threshold = _read_int("MONITORING_BACKLOG_THRESHOLD", 5)
+        if backlog_threshold is None or backlog_threshold < 0:
+            backlog_threshold = 5
+
+        window_hours = _read_int("MONITORING_WINDOW_HOURS", 24)
+        if window_hours is None or window_hours <= 0:
+            window_hours = 24
+
+        alert_cooldown_seconds = _read_int("MONITORING_ALERT_COOLDOWN_SECONDS", 3600)
+        if alert_cooldown_seconds is None or alert_cooldown_seconds < 0:
+            alert_cooldown_seconds = 3600
+
+        return cls(
+            state_db_path=state_db_path,
+            state_database_url=state_database_url,
+            failure_threshold=failure_threshold,
+            backlog_threshold=backlog_threshold,
+            window_hours=window_hours,
+            alert_cooldown_seconds=alert_cooldown_seconds,
+            alert_webhook_url=os.getenv("ALERT_WEBHOOK_URL") or None,
+            alert_telegram_bot_token=os.getenv("ALERT_TELEGRAM_BOT_TOKEN")
+            or os.getenv("TELEGRAM_BOT_TOKEN")
+            or None,
+            alert_telegram_chat_id=os.getenv("ALERT_TELEGRAM_CHAT_ID") or None,
+            log_level=os.getenv("LOG_LEVEL", "INFO"),
+        )
+
+

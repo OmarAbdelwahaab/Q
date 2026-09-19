@@ -105,10 +105,10 @@ looked up rather than re-derived.
 
 
 ## Phase 9 — Monitoring & hardening
-- [ ] Add a lightweight status report (chat-bot command or periodic summary)
-- [ ] Alert on repeated failures or a growing QA-gate review-queue backlog
-- [ ] Load-test with a burst of several videos in quick succession (concurrency handling)
-- [ ] Write a short runbook: reprocessing a failed item, adjusting QA thresholds, adding/removing target platforms
+- [x] **Add a lightweight status report (chat-bot command or periodic summary).** Implemented `PipelineMonitor` in `pipeline/monitoring/service.py` with `get_pipeline_summary()`, `fetch_recent_failures()`, and `count_consecutive_failures()` in `PipelineStateRepository`. Supports Markdown chat formatting and JSON output. Implemented `MonitoringBotHandler` in `pipeline/monitoring/bot.py` handling `/status [hours]`, `/health`, `/queue`, `/retry <id>`, and `/help`. Added CLI in `pipeline/monitoring/app.py` supporting `report` command with `--json`, `--window-hours`, and `--send-alert`.
+- [x] **Alert on repeated failures or a growing QA-gate review-queue backlog.** Implemented automated health checks in `PipelineMonitor.check_health()` and `dispatch_health_alerts()` evaluating `MONITORING_FAILURE_THRESHOLD` (default 3) and `MONITORING_BACKLOG_THRESHOLD` (default 5). Implemented alert cooldown tracking (`MONITORING_ALERT_COOLDOWN_SECONDS`, default 3600s) to suppress notification spam. Extended `AlertService` protocol and `CompositeAlertService` with `send_monitoring_alert()` and `send_status_report()`. Added CLI `check` command with exit codes 0 (healthy) and 2 (threshold breached).
+- [x] **Load-test with a burst of several videos in quick succession (concurrency handling).** Implemented `pipeline/tests/test_load.py` simulating 16 concurrent video arrivals using `concurrent.futures.ThreadPoolExecutor` and `threading.Barrier`. Verified thread-safe atomic claim execution (`claim_execution`), mutual exclusion on duplicate message IDs (1 processed, 15 skipped), serialization of rate-limit reservations (`reserve_publish_slot`), and graceful batch deferral to `scheduled` when posting windows are closed.
+- [x] **Write a short runbook: reprocessing a failed item, adjusting QA thresholds, adding/removing target platforms.** Created `docs/RUNBOOK.md` detailing operational triage, reprocessing failed items with `--force` and `--force-active`, inspecting and operating the QA Gate review queue, tuning `QA_MATCH_CONFIDENCE_THRESHOLD` and `QA_ALIGNMENT_COVERAGE_THRESHOLD`, configuring `PUBLISH_PLATFORMS`, and responding to health alerts.
 
 ## Phase 10 — Go-live
 - [ ] Switch publishing from sandbox/draft to live
