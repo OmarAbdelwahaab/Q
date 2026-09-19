@@ -419,6 +419,84 @@ class PipelineStateRepositoryTests(unittest.TestCase):
         mock_pool.close.assert_called_once()
         self.assertIsNone(repo_pg._pool)
 
+    def test_pooled_connection_wrapper_lifecycle_and_delegation(self) -> None:
+        """Verify _PooledConnectionWrapper delegates attributes and reclaims connections on close."""
+        from pipeline.state.repository import _PooledConnectionWrapper
+
+        # 1. Pool with getconn / putconn
+        mock_pool = MagicMock()
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_conn.cursor.return_value = mock_cur
+
+        wrapper = _PooledConnectionWrapper(mock_pool, mock_conn)
+        # Attribute delegation
+        cur = wrapper.cursor()
+        self.assertEqual(cur, mock_cur)
+        wrapper.commit()
+        mock_conn.commit.assert_called_once()
+
+        # Execute delegation
+        wrapper.execute("SELECT 1")
+        mock_conn.execute.assert_called_once_with("SELECT 1")
+
+        # Context manager with 'closing'
+        with closing(wrapper):
+            pass
+        mock_pool.putconn.assert_called_once_with(mock_conn)
+
+        # Idempotent close
+        wrapper.close()
+        self.assertEqual(mock_pool.putconn.call_count, 1)
+
+    def test_pooled_connection_wrapper_with_context_manager_pool(self) -> None:
+        """Verify _PooledConnectionWrapper properly exits context managers for connection() pools."""
+        from pipeline.state.repository import _PooledConnectionWrapper
+
+        mock_pool = MagicMock()
+        del mock_pool.putconn  # Pool only has connection() context manager
+        mock_cm = MagicMock()
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_conn.cursor.return_value = mock_cur
+        mock_cm.__enter__.return_value = mock_conn
+
+        wrapper = _PooledConnectionWrapper(mock_pool, mock_conn, context_manager=mock_cm)
+        cur = wrapper.cursor()
+        self.assertEqual(cur, mock_cur)
+
+        wrapper.close()
+        mock_cm.__exit__.assert_called_once_with(None, None, None)
+
+    def test_postgres_connect_returns_connection_not_context_manager(self) -> None:
+        """Verify _connect() never returns a raw context manager when pool provides connection()."""
+        repo_pg = PipelineStateRepository.__new__(PipelineStateRepository)
+        repo_pg.backend = "postgres"
+        repo_pg._driver = "psycopg"
+        repo_pg.database_url = "postgresql://localhost:5432/pipeline"
+
+        # Simulate a pool like psycopg_pool where connection() returns a context manager
+        mock_pool = MagicMock()
+        mock_cm = MagicMock()
+        mock_real_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_real_conn.cursor.return_value = mock_cur
+        mock_cm.__enter__.return_value = mock_real_conn
+        mock_pool.connection.return_value = mock_cm
+        del mock_pool.getconn
+
+        repo_pg._pool = mock_pool
+
+        conn = repo_pg._connect()
+        # conn must have cursor(), must NOT be the context manager itself
+        self.assertTrue(hasattr(conn, "cursor"))
+        cur = conn.cursor()
+        self.assertEqual(cur, mock_cur)
+
+        # Closing connection releases context manager
+        conn.close()
+        mock_cm.__exit__.assert_called_once_with(None, None, None)
+
     def test_concurrent_threads_claim_execution_mutual_exclusion(self) -> None:
         """Verify that under real multi-threaded concurrent contention, exactly 1 thread claims."""
         with tempfile.TemporaryDirectory() as temp_dir:

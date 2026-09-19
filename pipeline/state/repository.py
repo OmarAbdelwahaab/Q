@@ -12,21 +12,35 @@ from typing import Any
 class _PooledConnectionWrapper:
     """Wrapper ensuring connections retrieved from a pool are returned on close."""
 
-    def __init__(self, pool: Any, connection: Any) -> None:
+    def __init__(self, pool: Any, connection: Any, context_manager: Any = None) -> None:
         self._pool = pool
         self._connection = connection
+        self._cm = context_manager
+        self._closed = False
 
     def close(self) -> None:
-        if hasattr(self._pool, "putconn"):
+        if self._closed:
+            return
+        self._closed = True
+        if self._cm is not None:
+            self._cm.__exit__(None, None, None)
+        elif hasattr(self._pool, "putconn"):
             self._pool.putconn(self._connection)
         elif hasattr(self._connection, "close"):
             self._connection.close()
 
     def __enter__(self) -> Any:
-        return self._connection.__enter__()
+        return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> Any:
-        return self._connection.__exit__(exc_type, exc_val, exc_tb)
+        self.close()
+        return False
+
+    def execute(self, *args: Any, **kwargs: Any) -> Any:
+        if hasattr(self._connection, "execute"):
+            return self._connection.execute(*args, **kwargs)
+        cur = self._connection.cursor()
+        return cur.execute(*args, **kwargs)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._connection, name)
@@ -57,9 +71,11 @@ class PipelineStateRepository:
     ) -> None:
         self.database_url = database_url
         self._pool: Any = None
+        self._driver: str | None = None
         if database_url:
             self.backend = "postgres"
             self.database_path = None
+            self._driver = self._resolve_postgres_driver()
             self._init_postgres_pool()
         else:
             self.backend = "sqlite"
@@ -69,20 +85,41 @@ class PipelineStateRepository:
         self._placeholder = "%s" if self.backend == "postgres" else "?"
         self._initialize()
 
+    def _resolve_postgres_driver(self) -> str:
+        """Ensure a PostgreSQL driver is installed, returning 'psycopg' or 'psycopg2'."""
+        try:
+            import psycopg  # psycopg 3
+            if psycopg is not None:
+                return "psycopg"
+        except ImportError:
+            pass
+        try:
+            import psycopg2  # psycopg 2
+            if psycopg2 is not None:
+                return "psycopg2"
+        except ImportError:
+            pass
+        raise ImportError(
+            "PostgreSQL database URL provided, but neither 'psycopg' nor 'psycopg2' is installed. "
+            "Install 'psycopg[binary]' to connect to PostgreSQL."
+        )
+
     def _init_postgres_pool(self) -> None:
-        """Initialize PostgreSQL connection pool if pool drivers are installed."""
-        try:
-            from psycopg_pool import ConnectionPool
-            self._pool = ConnectionPool(self.database_url, min_size=1, max_size=10, open=True)
-            return
-        except ImportError:
-            pass
-        try:
-            from psycopg2.pool import ThreadedConnectionPool
-            self._pool = ThreadedConnectionPool(minconn=1, maxconn=10, dsn=self.database_url)
-            return
-        except ImportError:
-            pass
+        """Initialize PostgreSQL connection pool based on the resolved driver."""
+        if self._driver == "psycopg":
+            try:
+                from psycopg_pool import ConnectionPool
+                self._pool = ConnectionPool(self.database_url, min_size=1, max_size=10, open=True)
+                return
+            except (ImportError, Exception):
+                pass
+        elif self._driver == "psycopg2":
+            try:
+                from psycopg2.pool import ThreadedConnectionPool
+                self._pool = ThreadedConnectionPool(minconn=1, maxconn=10, dsn=self.database_url)
+                return
+            except (ImportError, Exception):
+                pass
         self._pool = None
 
     def close(self) -> None:
@@ -94,23 +131,23 @@ class PipelineStateRepository:
     def _connect(self) -> Any:
         if self.backend == "postgres":
             if self._pool is not None:
-                if hasattr(self._pool, "connection"):
-                    return self._pool.connection()
                 if hasattr(self._pool, "getconn"):
                     return _PooledConnectionWrapper(self._pool, self._pool.getconn())
-            try:
+                if hasattr(self._pool, "connection"):
+                    cm = self._pool.connection()
+                    conn = cm.__enter__()
+                    return _PooledConnectionWrapper(self._pool, conn, context_manager=cm)
+            if self._driver == "psycopg":
                 import psycopg  # psycopg 3
                 return psycopg.connect(self.database_url)
-            except ImportError:
-                pass
-            try:
+            elif self._driver == "psycopg2":
                 import psycopg2  # psycopg 2
                 return psycopg2.connect(self.database_url)
-            except ImportError as exc:
+            else:
                 raise ImportError(
                     "PostgreSQL database URL provided, but neither 'psycopg' nor 'psycopg2' is installed. "
                     "Install 'psycopg[binary]' to connect to PostgreSQL."
-                ) from exc
+                )
         else:
             connection = sqlite3.connect(self.database_path, timeout=30.0)
             connection.row_factory = sqlite3.Row
