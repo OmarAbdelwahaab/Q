@@ -127,6 +127,116 @@ class IngestionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(state_row["status"], "failed")
             self.assertEqual(state_row["error"], "network timeout")
 
+    async def test_successful_ingestion_triggers_on_ingested_callback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            state_repository = PipelineStateRepository(temp_path / "pipeline.db")
+            alert_service = RecordingAlertService()
+            service = IngestionService(
+                storage=LocalArtifactStorage(temp_path),
+                state_repository=state_repository,
+                alert_service=alert_service,
+            )
+
+            orchestrated_ids: list[int] = []
+
+            async def mock_on_ingested(message_id: int) -> None:
+                orchestrated_ids.append(message_id)
+
+            listener = TelethonIngestionListener(
+                api_id=1,
+                api_hash="hash",
+                session_name="session",
+                channel_id="channel",
+                ingestion_service=service,
+                on_ingested=mock_on_ingested,
+            )
+
+            async def download_behavior(file: str) -> str:
+                Path(file).write_bytes(b"video-data")
+                return file
+
+            message = FakeTelegramMessage(message_id=303, duration=15, download_behavior=download_behavior)
+            result = await listener.process_message(message, chat_id=-1001234567890)
+
+            self.assertIsNotNone(result)
+            assert result is not None
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(orchestrated_ids, [303])
+
+    async def test_failed_ingestion_does_not_trigger_on_ingested(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            state_repository = PipelineStateRepository(temp_path / "pipeline.db")
+            alert_service = RecordingAlertService()
+            service = IngestionService(
+                storage=LocalArtifactStorage(temp_path),
+                state_repository=state_repository,
+                alert_service=alert_service,
+                retry_attempts=1,
+                retry_backoff_seconds=(),
+            )
+
+            orchestrated_ids: list[int] = []
+
+            async def mock_on_ingested(message_id: int) -> None:
+                orchestrated_ids.append(message_id)
+
+            listener = TelethonIngestionListener(
+                api_id=1,
+                api_hash="hash",
+                session_name="session",
+                channel_id="channel",
+                ingestion_service=service,
+                on_ingested=mock_on_ingested,
+            )
+
+            async def fail_download(file: str) -> str | None:
+                raise RuntimeError("download failed")
+
+            message = FakeTelegramMessage(message_id=404, duration=15, download_behavior=fail_download)
+            result = await listener.process_message(message, chat_id=-1001234567890)
+
+            self.assertIsNotNone(result)
+            assert result is not None
+            self.assertEqual(result.status, "failed")
+            self.assertEqual(orchestrated_ids, [])
+
+    def test_background_web_server_health_and_media(self) -> None:
+        import urllib.request
+        from pipeline.ingestion.web import start_background_web_server
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            render_dir = temp_path / "render"
+            render_dir.mkdir(parents=True)
+            (render_dir / "test.mp4").write_bytes(b"dummy mp4 content")
+
+            # Start web server on an ephemeral OS-assigned port (e.g. 0 or high port)
+            import socket
+            sock = socket.socket()
+            sock.bind(("", 0))
+            free_port = sock.getsockname()[1]
+            sock.close()
+
+            server = start_background_web_server(free_port, temp_path)
+            try:
+                # 1. Health endpoint
+                health_url = f"http://127.0.0.1:{free_port}/health"
+                with urllib.request.urlopen(health_url, timeout=5) as response:
+                    self.assertEqual(response.status, 200)
+                    body = response.read().decode("utf-8")
+                    self.assertIn("quran-pipeline", body)
+
+                # 2. Static media endpoint via /render/test.mp4
+                media_url = f"http://127.0.0.1:{free_port}/render/test.mp4"
+                with urllib.request.urlopen(media_url, timeout=5) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(response.read(), b"dummy mp4 content")
+            finally:
+                server.shutdown()
+                server.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -44,6 +44,7 @@ class IngestionSettings:
     retry_backoff_seconds: tuple[int, ...]
     log_level: str
     log_include_source: bool
+    auto_orchestrate: bool = False
 
     @classmethod
     def from_env(cls) -> "IngestionSettings":
@@ -77,6 +78,7 @@ class IngestionSettings:
             retry_backoff_seconds=retry_backoff,
             log_level=os.getenv("LOG_LEVEL", "INFO"),
             log_include_source=_read_bool("LOG_INCLUDE_SOURCE", False),
+            auto_orchestrate=_read_bool("AUTO_ORCHESTRATE", False),
         )
 
 

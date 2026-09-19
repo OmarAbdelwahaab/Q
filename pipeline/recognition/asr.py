@@ -26,7 +26,10 @@ class WhisperTranscriber:
         if not audio_path.is_file():
             raise TranscriptionError(f"Audio artifact does not exist: {audio_path}")
         boundary = f"----pipeline-{uuid.uuid4().hex}"
-        headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
+        headers = {
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "User-Agent": "QuranPipeline/1.0",
+        }
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         request = urllib.request.Request(self.api_url, data=self._multipart(boundary, audio_path), headers=headers, method="POST")

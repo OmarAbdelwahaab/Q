@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from pipeline.ingestion.service import IngestionResult, IngestionService, IncomingVideoMessage
 from pipeline.logging import get_logger
@@ -21,6 +21,7 @@ class TelethonIngestionListener:
         channel_id: str,
         ingestion_service: IngestionService,
         bot_token: str | None = None,
+        on_ingested: Callable[[int], Awaitable[Any]] | None = None,
     ) -> None:
         self.api_id = api_id
         self.api_hash = api_hash
@@ -28,6 +29,7 @@ class TelethonIngestionListener:
         self.channel_id = channel_id
         self.ingestion_service = ingestion_service
         self.bot_token = bot_token
+        self.on_ingested = on_ingested
         self.logger = get_logger(__name__, service="ingestion")
 
     async def start(self) -> None:
@@ -63,6 +65,14 @@ class TelethonIngestionListener:
 
         normalized_message = self._normalize_message(telegram_message, chat_id)
         result = await self.ingestion_service.ingest(normalized_message)
+        if result and result.status == "completed" and self.on_ingested:
+            try:
+                await self.on_ingested(result.message_id)
+            except Exception as exc:
+                self.logger.error(
+                    "Error executing on_ingested callback",
+                    extra={"message_id": result.message_id, "error": str(exc)},
+                )
         return result
 
     def _normalize_message(self, telegram_message: Any, chat_id: int | str) -> IncomingVideoMessage:
