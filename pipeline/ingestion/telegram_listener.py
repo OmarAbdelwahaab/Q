@@ -15,6 +15,7 @@ def normalize_telegram_target(target: str | int) -> int | str:
 
     - Numeric strings (e.g. "-100123456789" or "123456789") -> int
     - URLs (e.g. "https://t.me/channel" or "t.me/channel") -> "@channel"
+    - Invite links (e.g. "+...", "joinchat/...") -> unchanged string
     - Bare usernames (e.g. "channel") -> "@channel"
     - Pre-formatted usernames (e.g. "@channel") -> "@channel"
     """
@@ -31,6 +32,10 @@ def normalize_telegram_target(target: str | int) -> int | str:
         s = s[len("http://t.me/"):]
     elif s.startswith("t.me/"):
         s = s[len("t.me/"):]
+
+    if s.startswith("+") or s.startswith("joinchat/"):
+        return s
+
     s = s.lstrip("@")
     return f"@{s}" if s else target
 
@@ -137,10 +142,30 @@ class TelethonIngestionListener:
                     "Failed to find Telegram channel or chat entity",
                     extra={"channel_id": self.channel_id, "target": str(target), "error": str(exc)},
                 )
-                raise RuntimeError(
-                    f"Could not resolve Telegram entity '{self.channel_id}' (target: '{target}'): {exc}. "
-                    "Ensure the channel username or numeric ID is correct and accessible."
-                ) from exc
+                err_text = str(exc)
+                exc_type = type(exc).__name__
+                if (
+                    "UsernameNotOccupied" in exc_type
+                    or "not in use" in err_text.lower()
+                    or "no user has" in err_text.lower()
+                ):
+                    hint = (
+                        f"The Telegram channel/username '{self.channel_id}' does not exist on Telegram. "
+                        "Please verify your channel's public @username or numeric ID, and update TELEGRAM_CHANNEL_ID "
+                        "in your repository variables (Settings -> Secrets and variables -> Actions -> Variables) "
+                        "or provide it in the 'Run workflow' inputs."
+                    )
+                elif "ChannelPrivate" in exc_type or "private" in err_text.lower():
+                    hint = (
+                        f"The Telegram channel '{self.channel_id}' is private and your Telegram account is not a member. "
+                        "Please join the channel with your account first, or use a public channel handle."
+                    )
+                else:
+                    hint = (
+                        f"Could not resolve Telegram entity '{self.channel_id}' (target: '{target}'): {exc}. "
+                        "Ensure the channel username or numeric ID is correct and accessible by your Telegram account."
+                    )
+                raise RuntimeError(hint) from exc
 
             async for message in client.iter_messages(channel, limit=limit):
                 if not getattr(message, "video", None):

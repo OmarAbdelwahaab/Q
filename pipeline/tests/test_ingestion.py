@@ -319,6 +319,9 @@ class IngestionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(normalize_telegram_target("t.me/quran_channel"), "@quran_channel")
         self.assertEqual(normalize_telegram_target("-100123456789"), -100123456789)
         self.assertEqual(normalize_telegram_target(123456789), 123456789)
+        self.assertEqual(normalize_telegram_target("+abcde12345"), "+abcde12345")
+        self.assertEqual(normalize_telegram_target("https://t.me/+abcde12345"), "+abcde12345")
+        self.assertEqual(normalize_telegram_target("t.me/joinchat/abcde"), "joinchat/abcde")
 
     def test_context_logger_adapter_merges_extra(self) -> None:
         import logging
@@ -366,6 +369,43 @@ class IngestionTests(unittest.IsolatedAsyncioTestCase):
                 await listener.poll_recent_videos(limit=5)
             self.assertIn("Telegram client is not authorized", str(ctx.exception))
             self.assertIn("TELEGRAM_SESSION_STRING", str(ctx.exception))
+
+    async def test_poll_recent_videos_entity_resolution_failure_gives_helpful_hint(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            state_repository = PipelineStateRepository(temp_path / "pipeline.db")
+            alert_service = RecordingAlertService()
+            service = IngestionService(
+                storage=LocalArtifactStorage(temp_path),
+                state_repository=state_repository,
+                alert_service=alert_service,
+            )
+            listener = TelethonIngestionListener(
+                api_id=1,
+                api_hash="hash",
+                session_name="session",
+                channel_id="nonexistent_channel_xyz",
+                ingestion_service=service,
+            )
+
+            class FailingEntityClient:
+                def is_connected(self) -> bool:
+                    return True
+                async def connect(self) -> None:
+                    pass
+                async def is_user_authorized(self) -> bool:
+                    return True
+                async def get_entity(self, target: Any) -> Any:
+                    raise ValueError("No user has \"nonexistent_channel_xyz\" as username (caused by ResolveUsernameRequest)")
+                async def disconnect(self) -> None:
+                    pass
+
+            listener._create_client = lambda: FailingEntityClient()
+
+            with self.assertRaises(RuntimeError) as ctx:
+                await listener.poll_recent_videos(limit=5)
+            self.assertIn("does not exist on Telegram", str(ctx.exception))
+            self.assertIn("TELEGRAM_CHANNEL_ID", str(ctx.exception))
 
 
 if __name__ == "__main__":
