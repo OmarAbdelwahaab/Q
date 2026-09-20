@@ -106,7 +106,11 @@ class TelethonIngestionListener:
         )
         await client.run_until_disconnected()
 
-    async def poll_recent_videos(self, limit: int = 10) -> list[IngestionResult]:
+    async def poll_recent_videos(
+        self,
+        limit: int = 10,
+        max_downloads: int | None = None,
+    ) -> list[IngestionResult]:
         """Fetch recent channel messages, process any newly arrived videos, and return results."""
         if not self.api_id or not self.api_hash or not self.channel_id:
             raise ValueError("Telegram listener configuration is incomplete.")
@@ -134,6 +138,7 @@ class TelethonIngestionListener:
 
         target = normalize_telegram_target(self.channel_id)
         results: list[IngestionResult] = []
+        download_count = 0
         try:
             try:
                 channel = await client.get_entity(target)
@@ -181,10 +186,18 @@ class TelethonIngestionListener:
                     )
                     continue
 
+                if max_downloads is not None and download_count >= max_downloads:
+                    self.logger.info(
+                        "Reached maximum download count for this polling batch",
+                        extra={"max_downloads": max_downloads, "downloaded": download_count},
+                    )
+                    break
+
                 chat_id = getattr(channel, "id", self.channel_id)
                 res = await self.process_message(message, chat_id)
                 if res:
                     results.append(res)
+                    download_count += 1
         finally:
             await client.disconnect()
 

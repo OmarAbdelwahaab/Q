@@ -297,9 +297,99 @@ class IngestionTests(unittest.IsolatedAsyncioTestCase):
             mock_listener.poll_recent_videos.return_value = []
             mock_builder.return_value = mock_listener
 
-            exit_code = await poll_main(["--limit", "5"])
+            exit_code = await poll_main(["--limit", "5", "--max-downloads", "3"])
             self.assertEqual(exit_code, 0)
-            mock_listener.poll_recent_videos.assert_awaited_once_with(limit=5)
+            mock_listener.poll_recent_videos.assert_awaited_once_with(limit=5, max_downloads=3)
+
+    async def test_poll_recent_videos_respects_max_downloads(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            state_repo = PipelineStateRepository(temp_path / "pipeline.db")
+            service = IngestionService(
+                storage=LocalArtifactStorage(temp_path),
+                state_repository=state_repo,
+                alert_service=RecordingAlertService(),
+            )
+
+            processed_ids: list[int] = []
+
+            async def mock_on_ingested(message_id: int) -> None:
+                processed_ids.append(message_id)
+
+            listener = TelethonIngestionListener(
+                api_id=1,
+                api_hash="hash",
+                session_name="session",
+                channel_id="channel",
+                ingestion_service=service,
+                on_ingested=mock_on_ingested,
+            )
+
+            class FakeChannel:
+                id = -1001234567890
+
+            async def dl(f: str) -> str:
+                Path(f).write_bytes(b"data")
+                return f
+
+            class MockClient:
+                async def start(self, **kwargs) -> None:
+                    pass
+                async def get_entity(self, channel_id: str) -> FakeChannel:
+                    return FakeChannel()
+                async def iter_messages(self, channel: Any, limit: int = 10):
+                    yield FakeTelegramMessage(601, 30, dl)
+                    yield FakeTelegramMessage(602, 30, dl)
+                    yield FakeTelegramMessage(603, 30, dl)
+                async def disconnect(self) -> None:
+                    pass
+
+            listener._create_client = lambda: MockClient()  # type: ignore[method-assign]
+
+            # Limit is 10 messages, but max_downloads is 2
+            results = await listener.poll_recent_videos(limit=10, max_downloads=2)
+            self.assertEqual(len(results), 2)
+            self.assertEqual([r.message_id for r in results], [601, 602])
+            self.assertEqual(processed_ids, [601, 602])
+
+    async def test_build_ingestion_listener_auto_orchestrate_wiring(self) -> None:
+        from unittest.mock import patch, AsyncMock, MagicMock
+        from pipeline.config import IngestionSettings
+        from pipeline.ingestion.app import build_ingestion_listener
+        from pipeline.orchestration.runner import PipelineExecutionSummary
+
+        mock_orch = AsyncMock()
+        mock_orch.run.return_value = PipelineExecutionSummary(
+            message_id=701,
+            status="completed",
+        )
+        mock_repo = MagicMock()
+
+        with patch("pipeline.orchestration.app.build_orchestrator", return_value=(mock_orch, mock_repo)):
+            settings = IngestionSettings(
+                telegram_api_id=1,
+                telegram_api_hash="hash",
+                telegram_bot_token=None,
+                telegram_channel_id="moathemam",
+                telegram_session_name="session",
+                telegram_session_string="session",
+                state_db_path=Path("pipeline/state/pipeline.db"),
+                storage_root=Path("storage"),
+                alert_webhook_url=None,
+                alert_telegram_bot_token=None,
+                alert_telegram_chat_id=None,
+                retry_attempts=1,
+                retry_backoff_seconds=(1,),
+                log_level="INFO",
+                log_include_source=False,
+                auto_orchestrate=True,
+            )
+            listener = build_ingestion_listener(settings)
+            self.assertIsNotNone(listener.on_ingested)
+            assert listener.on_ingested is not None
+            # Trigger callback
+            await listener.on_ingested(701)
+            mock_orch.run.assert_awaited_once_with(701)
 
     async def test_poll_main_fails_fast_on_missing_asr_key_when_auto_orchestrating(self) -> None:
         import os
@@ -406,6 +496,28 @@ class IngestionTests(unittest.IsolatedAsyncioTestCase):
                 await listener.poll_recent_videos(limit=5)
             self.assertIn("does not exist on Telegram", str(ctx.exception))
             self.assertIn("TELEGRAM_CHANNEL_ID", str(ctx.exception))
+
+    def test_validate_env_script_detects_missing_and_valid(self) -> None:
+        import os
+        from unittest.mock import patch
+        from scripts.validate_env import main as validate_env_main
+
+        # All missing
+        with patch.dict(os.environ, {}, clear=True):
+            code = validate_env_main()
+            self.assertEqual(code, 1)
+
+        # All provided
+        valid_env = {
+            "ASR_API_KEY": "dummy_asr",
+            "TELEGRAM_API_ID": "12345",
+            "TELEGRAM_API_HASH": "dummy_hash",
+            "TELEGRAM_SESSION_STRING": "dummy_session",
+            "TELEGRAM_CHANNEL_ID": "moathemam",
+        }
+        with patch.dict(os.environ, valid_env, clear=True):
+            code = validate_env_main()
+            self.assertEqual(code, 0)
 
 
 if __name__ == "__main__":

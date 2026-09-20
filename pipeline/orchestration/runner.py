@@ -128,7 +128,7 @@ class PipelineOrchestrator:
         self,
         message_id: int,
         source_path: Path | None = None,
-        draft: bool = False,
+        draft: bool | None = None,
         enforce_scheduler: bool = True,
         wait_for_window: bool = False,
         sleep_fn: Callable[[float], Awaitable[None]] | None = None,

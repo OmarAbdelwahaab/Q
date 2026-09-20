@@ -10,6 +10,10 @@ on:
         description: 'Maximum number of recent channel messages to check'
         required: false
         default: '10'
+      max_downloads:
+        description: 'Maximum new videos to download and process in this run'
+        required: false
+        default: '2'
       channel_id:
         description: 'Telegram Channel username (@channel), numeric ID (-100...), or private invite link'
         required: false
@@ -25,7 +29,7 @@ permissions:
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     steps:
       - name: Checkout Code
@@ -64,35 +68,16 @@ jobs:
           fi
 
       - name: Validate Required Secrets and Configuration
+        env:
+          ASR_API_KEY: ${{ secrets.ASR_API_KEY }}
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          TELEGRAM_SESSION_STRING: ${{ secrets.TELEGRAM_SESSION_STRING }}
+          TELEGRAM_CHANNEL_ID: ${{ github.event.inputs.channel_id || vars.TELEGRAM_CHANNEL_ID || 'moathemam' }}
+          ALERT_TELEGRAM_BOT_TOKEN: ${{ secrets.ALERT_TELEGRAM_BOT_TOKEN }}
+          ALERT_TELEGRAM_CHAT_ID: ${{ secrets.ALERT_TELEGRAM_CHAT_ID }}
         run: |
-          MISSING=""
-          if [ -z "${{ secrets.ASR_API_KEY }}" ]; then
-            echo "::error title=Missing Secret::Secret 'ASR_API_KEY' is missing or empty! Please add your Groq API key in Settings -> Secrets and variables -> Actions."
-            MISSING="1"
-          fi
-          if [ -z "${{ secrets.TELEGRAM_API_ID }}" ]; then
-            echo "::error title=Missing Secret::Secret 'TELEGRAM_API_ID' is missing or empty! Please add your Telegram API ID in Settings -> Secrets and variables -> Actions."
-            MISSING="1"
-          fi
-          if [ -z "${{ secrets.TELEGRAM_API_HASH }}" ]; then
-            echo "::error title=Missing Secret::Secret 'TELEGRAM_API_HASH' is missing or empty! Please add your Telegram API Hash in Settings -> Secrets and variables -> Actions."
-            MISSING="1"
-          fi
-          if [ -z "${{ secrets.TELEGRAM_SESSION_STRING }}" ]; then
-            echo "::error title=Missing Secret::Secret 'TELEGRAM_SESSION_STRING' is missing or empty! In GitHub Actions, interactive login is impossible. Run 'python scripts/generate_session_string.py' on your computer to log in once, then paste the output string into Settings -> Secrets and variables -> Actions."
-            MISSING="1"
-          fi
-
-          CHANNEL="${{ github.event.inputs.channel_id || vars.TELEGRAM_CHANNEL_ID || 'moathemam' }}"
-          if [ -z "$CHANNEL" ]; then
-            echo "::error title=Channel Not Configured::TELEGRAM_CHANNEL_ID is not configured! Please set your Telegram channel username (e.g. @moathemam or -100...) in Settings -> Secrets and variables -> Actions -> Variables -> 'TELEGRAM_CHANNEL_ID', or enter it in the 'channel_id' input field when clicking 'Run workflow'."
-            MISSING="1"
-          fi
-
-          if [ -n "$MISSING" ]; then
-            echo "::error::Required configuration is missing. Stopping workflow before executing pipeline."
-            exit 1
-          fi
+          python scripts/validate_env.py
 
       - name: Run Autonomous Ingestion & Pipeline Poller
         env:
@@ -115,31 +100,33 @@ jobs:
           PIPELINE_PROJECT_ROOT: "."
           PIPELINE_STORAGE_ROOT: "storage"
         run: |
-          python -m pipeline.ingestion.poll --limit ${{ github.event.inputs.limit || '10' }}
+          python -m pipeline.ingestion.poll --limit ${{ github.event.inputs.limit || '10' }} --max-downloads ${{ github.event.inputs.max_downloads || '2' }}
 
       - name: Persist Pipeline State Database to Git Branch
         if: always()
         run: |
           if [ -f "pipeline/state/pipeline.db" ]; then
+            STATE_DIR=$(mktemp -d)
+            cd "$STATE_DIR"
+            git init
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            
-            # Stash any storage or untracked artifacts before switching branch
-            git stash --include-untracked || true
-            
-            # Fetch or create pipeline-state branch
-            git fetch origin pipeline-state:pipeline-state 2>/dev/null || git checkout --orphan pipeline-state
+            REPO_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+
+            git fetch --depth=1 "$REPO_URL" pipeline-state:pipeline-state 2>/dev/null || true
             git checkout pipeline-state 2>/dev/null || git checkout -b pipeline-state
-            
-            # Restore the updated pipeline.db from stash
-            git checkout stash -- pipeline/state/pipeline.db 2>/dev/null || true
-            git add -f pipeline/state/pipeline.db
-            
+
+            mkdir -p pipeline/state
+            cp "$GITHUB_WORKSPACE/pipeline/state/pipeline.db" pipeline/state/pipeline.db
+            git add pipeline/state/pipeline.db
+
             if ! git diff --cached --quiet; then
               git commit -m "chore(state): persist pipeline.db execution state [skip ci]"
-              git push origin pipeline-state
+              git push "$REPO_URL" pipeline-state
               echo "Pipeline state successfully committed and pushed to pipeline-state branch."
             else
               echo "No state database modifications to commit."
             fi
+            cd "$GITHUB_WORKSPACE"
+            rm -rf "$STATE_DIR"
           fi

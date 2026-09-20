@@ -38,7 +38,7 @@ def build_ingestion_listener(
         from pipeline.config import OrchestrationSettings
         from pipeline.orchestration.app import build_orchestrator
 
-        orchestrator = build_orchestrator(OrchestrationSettings.from_env())
+        orchestrator, _ = build_orchestrator(OrchestrationSettings.from_env())
         logger = get_logger(__name__, service="ingestion")
 
         async def _trigger_orchestration(message_id: int) -> None:
@@ -46,7 +46,16 @@ def build_ingestion_listener(
                 "Auto-triggering pipeline orchestration",
                 extra={"message_id": message_id},
             )
-            asyncio.create_task(orchestrator.run(message_id))
+            summary = await orchestrator.run(message_id)
+            logger.info(
+                "Pipeline orchestration completed",
+                extra={
+                    "message_id": message_id,
+                    "status": summary.status,
+                    "duration_seconds": summary.duration_seconds,
+                    "error": summary.error,
+                },
+            )
 
         on_ingested = _trigger_orchestration
 
