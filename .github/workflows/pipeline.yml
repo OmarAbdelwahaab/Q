@@ -13,7 +13,7 @@ on:
       channel_id:
         description: 'Telegram Channel username (@channel), numeric ID (-100...), or private invite link'
         required: false
-        default: ''
+        default: 'moathemam'
 
 concurrency:
   group: quran-pipeline-execution
@@ -83,9 +83,9 @@ jobs:
             MISSING="1"
           fi
 
-          CHANNEL="${{ github.event.inputs.channel_id || vars.TELEGRAM_CHANNEL_ID }}"
-          if [ -z "$CHANNEL" ] || [ "$CHANNEL" = "emamoathen" ]; then
-            echo "::error title=Channel Not Configured::TELEGRAM_CHANNEL_ID is not configured! The placeholder 'emamoathen' does not exist on Telegram. Please set your Telegram channel username (e.g. @YourChannel or -100...) in Settings -> Secrets and variables -> Actions -> Variables -> 'TELEGRAM_CHANNEL_ID', or enter it in the 'channel_id' input field when clicking 'Run workflow'."
+          CHANNEL="${{ github.event.inputs.channel_id || vars.TELEGRAM_CHANNEL_ID || 'moathemam' }}"
+          if [ -z "$CHANNEL" ]; then
+            echo "::error title=Channel Not Configured::TELEGRAM_CHANNEL_ID is not configured! Please set your Telegram channel username (e.g. @moathemam or -100...) in Settings -> Secrets and variables -> Actions -> Variables -> 'TELEGRAM_CHANNEL_ID', or enter it in the 'channel_id' input field when clicking 'Run workflow'."
             MISSING="1"
           fi
 
@@ -98,7 +98,7 @@ jobs:
         env:
           TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
           TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
-          TELEGRAM_CHANNEL_ID: ${{ github.event.inputs.channel_id || vars.TELEGRAM_CHANNEL_ID }}
+          TELEGRAM_CHANNEL_ID: ${{ github.event.inputs.channel_id || vars.TELEGRAM_CHANNEL_ID || 'moathemam' }}
           TELEGRAM_SESSION_STRING: ${{ secrets.TELEGRAM_SESSION_STRING }}
           AUTO_ORCHESTRATE: "true"
           ASR_API_URL: ${{ vars.ASR_API_URL || 'https://api.groq.com/openai/v1/audio/transcriptions' }}
