@@ -76,6 +76,7 @@ jobs:
           TELEGRAM_CHANNEL_ID: ${{ github.event.inputs.channel_id || vars.TELEGRAM_CHANNEL_ID || 'moathemam' }}
           ALERT_TELEGRAM_BOT_TOKEN: ${{ secrets.ALERT_TELEGRAM_BOT_TOKEN }}
           ALERT_TELEGRAM_CHAT_ID: ${{ secrets.ALERT_TELEGRAM_CHAT_ID }}
+          ALIGNMENT_DEVICE: "cpu"
         run: |
           python scripts/validate_env.py
 
@@ -92,6 +93,7 @@ jobs:
           ALIGNER_BINARY: "ctc-forced-aligner"
           ALIGNMENT_MODEL: "jonatasgrosman/wav2vec2-large-xlsr-53-arabic"
           ALIGNMENT_DEVICE: "cpu"
+          CTC_ALIGNMENT_DEVICE: "cpu"
           BRANDING_HANDLE: ${{ vars.BRANDING_HANDLE || '@YourChannel' }}
           PUBLISH_DRAFT_MODE: ${{ vars.PUBLISH_DRAFT_MODE || 'true' }}
           ALERT_TELEGRAM_BOT_TOKEN: ${{ secrets.ALERT_TELEGRAM_BOT_TOKEN }}

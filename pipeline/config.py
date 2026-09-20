@@ -180,9 +180,9 @@ class AlignmentSettings:
         return cls(
             state_db_path=Path(os.getenv("STATE_DB_PATH", str(project_root / "pipeline" / "state" / "pipeline.db"))).resolve(),
             storage_root=storage_root,
-            aligner_binary=os.getenv("CTC_ALIGNER_BINARY", "ctc-forced-aligner"),
-            alignment_model=os.getenv("CTC_ALIGNMENT_MODEL", "jonatasgrosman/wav2vec2-large-xlsr-53-arabic"),
-            alignment_device=os.getenv("CTC_ALIGNMENT_DEVICE", "cuda"),
+            aligner_binary=os.getenv("ALIGNER_BINARY") or os.getenv("CTC_ALIGNER_BINARY", "ctc-forced-aligner"),
+            alignment_model=os.getenv("ALIGNMENT_MODEL") or os.getenv("CTC_ALIGNMENT_MODEL", "jonatasgrosman/wav2vec2-large-xlsr-53-arabic"),
+            alignment_device=os.getenv("ALIGNMENT_DEVICE") or os.getenv("CTC_ALIGNMENT_DEVICE", "cpu"),
             alignment_batch_size=batch_size,
             alert_webhook_url=os.getenv("ALERT_WEBHOOK_URL") or None,
             alert_telegram_bot_token=os.getenv("ALERT_TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or None,

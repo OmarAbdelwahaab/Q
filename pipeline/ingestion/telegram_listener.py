@@ -176,15 +176,45 @@ class TelethonIngestionListener:
                 if not getattr(message, "video", None):
                     continue
 
-                existing = self.ingestion_service.state_repository.fetch_stage(
+                ingest_stage = self.ingestion_service.state_repository.fetch_stage(
                     message.id, "ingestion"
                 )
-                if existing and existing.get("status") in ("completed", "processing"):
+                orch_stage = self.ingestion_service.state_repository.fetch_stage(
+                    message.id, "orchestration"
+                )
+                pub_stage = self.ingestion_service.state_repository.fetch_stage(
+                    message.id, "publish"
+                )
+
+                # Skip if already fully published, completed, or held for review by QA Gate
+                if (pub_stage and pub_stage.get("status") == "completed") or (
+                    orch_stage and orch_stage.get("status") in ("completed", "held_for_review")
+                ):
                     self.logger.info(
-                        "Skipping already ingested message during poll",
-                        extra={"message_id": message.id, "status": existing.get("status")},
+                        "Skipping already processed message during poll",
+                        extra={"message_id": message.id, "status": (pub_stage or orch_stage).get("status")},
                     )
                     continue
+
+                if not self.on_ingested and ingest_stage and ingest_stage.get("status") in ("completed", "processing"):
+                    self.logger.info(
+                        "Skipping already ingested message during poll",
+                        extra={"message_id": message.id, "status": ingest_stage.get("status")},
+                    )
+                    continue
+
+                if self.on_ingested and ingest_stage and ingest_stage.get("status") == "completed":
+                    if orch_stage and orch_stage.get("status") == "failed":
+                        self.logger.info(
+                            "Retrying previously failed orchestration for message during poll",
+                            extra={"message_id": message.id},
+                        )
+                    elif not orch_stage or orch_stage.get("status") == "processing":
+                        self.logger.info(
+                            "Skipping already ingested message during poll",
+                            extra={"message_id": message.id, "status": "completed"},
+                        )
+                        continue
 
                 if max_downloads is not None and download_count >= max_downloads:
                     self.logger.info(

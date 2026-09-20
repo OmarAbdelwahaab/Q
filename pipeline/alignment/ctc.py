@@ -30,7 +30,7 @@ CommandRunner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 class CtcForcedAligner:
     """Run CTC alignment in a disposable directory; its JSON sidecar never leaks."""
 
-    def __init__(self, binary: str = "ctc-forced-aligner", model: str = "jonatasgrosman/wav2vec2-large-xlsr-53-arabic", device: str = "cuda", batch_size: int = 4, runner: CommandRunner | None = None) -> None:
+    def __init__(self, binary: str = "ctc-forced-aligner", model: str = "jonatasgrosman/wav2vec2-large-xlsr-53-arabic", device: str = "cpu", batch_size: int = 4, runner: CommandRunner | None = None) -> None:
         self.binary, self.model, self.device, self.batch_size = binary, model, device, batch_size
         self.runner = runner or self._run
 

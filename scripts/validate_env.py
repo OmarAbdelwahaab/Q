@@ -62,6 +62,10 @@ def main() -> int:
     else:
         print(f"[OK] TELEGRAM_CHANNEL_ID is configured: '{channel}'.")
 
+    # 6. Alignment Device
+    align_device = os.environ.get("ALIGNMENT_DEVICE") or os.environ.get("CTC_ALIGNMENT_DEVICE", "cpu")
+    print(f"[OK] Alignment device configured: '{align_device}'.")
+
     # Optional Telegram Alerts
     bot_token = os.environ.get("ALERT_TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.environ.get("ALERT_TELEGRAM_CHAT_ID", "").strip()

@@ -95,3 +95,19 @@ class AlignmentTests(unittest.TestCase):
             result = asyncio.run(AlignmentService(root, state, alerts, StubAligner(AlignmentError("model unavailable"))).align(502))
             self.assertEqual(result.status, "failed"); self.assertEqual(len(alerts.messages), 1)
             self.assertFalse((root / "align" / "502.json").exists())
+
+    def test_alignment_device_defaults_to_cpu(self) -> None:
+        import os
+        from unittest.mock import patch
+        from pipeline.config import AlignmentSettings
+
+        self.assertEqual(CtcForcedAligner().device, "cpu")
+
+        with patch.dict(os.environ, {}, clear=True):
+            settings = AlignmentSettings.from_env()
+            self.assertEqual(settings.alignment_device, "cpu")
+
+        with patch.dict(os.environ, {"ALIGNMENT_DEVICE": "cpu"}, clear=True):
+            settings = AlignmentSettings.from_env()
+            self.assertEqual(settings.alignment_device, "cpu")
+
