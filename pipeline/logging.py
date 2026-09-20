@@ -94,7 +94,19 @@ def configure_logging(service_name: str = "pipeline", level: str | None = None) 
     root.addHandler(handler)
 
 
-def get_logger(name: str, **context: Any) -> logging.LoggerAdapter:
+class ContextLoggerAdapter(logging.LoggerAdapter):
+    """Logger adapter that merges initial context with call-site 'extra' fields."""
+
+    def process(self, msg: Any, kwargs: Any) -> tuple[Any, Any]:
+        extra = dict(self.extra) if self.extra else {}
+        call_extra = kwargs.get("extra")
+        if isinstance(call_extra, dict):
+            extra.update(call_extra)
+        kwargs["extra"] = extra
+        return msg, kwargs
+
+
+def get_logger(name: str, **context: Any) -> ContextLoggerAdapter:
     """Return a logger adapter that carries structured context fields."""
 
-    return logging.LoggerAdapter(logging.getLogger(name), context)
+    return ContextLoggerAdapter(logging.getLogger(name), context)

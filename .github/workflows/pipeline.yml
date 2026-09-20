@@ -74,6 +74,10 @@ jobs:
             echo "::error title=Missing Secret::Secret 'TELEGRAM_API_HASH' is missing or empty! Please add your Telegram API Hash in Settings -> Secrets and variables -> Actions."
             MISSING="1"
           fi
+          if [ -z "${{ secrets.TELEGRAM_SESSION_STRING }}" ]; then
+            echo "::error title=Missing Secret::Secret 'TELEGRAM_SESSION_STRING' is missing or empty! In GitHub Actions, interactive login is impossible. Run 'python scripts/generate_session_string.py' on your computer to log in once, then paste the output string into Settings -> Secrets and variables -> Actions."
+            MISSING="1"
+          fi
           if [ -n "$MISSING" ]; then
             echo "::error::Required secrets are missing. Stopping workflow before executing pipeline."
             exit 1

@@ -310,6 +310,63 @@ class IngestionTests(unittest.IsolatedAsyncioTestCase):
             exit_code = await poll_main(["--limit", "5"])
             self.assertEqual(exit_code, 1)
 
+    def test_normalize_telegram_target_variants(self) -> None:
+        from pipeline.ingestion.telegram_listener import normalize_telegram_target
+
+        self.assertEqual(normalize_telegram_target("emamoathen"), "@emamoathen")
+        self.assertEqual(normalize_telegram_target("@emamoathen"), "@emamoathen")
+        self.assertEqual(normalize_telegram_target("https://t.me/emamoathen"), "@emamoathen")
+        self.assertEqual(normalize_telegram_target("t.me/quran_channel"), "@quran_channel")
+        self.assertEqual(normalize_telegram_target("-100123456789"), -100123456789)
+        self.assertEqual(normalize_telegram_target(123456789), 123456789)
+
+    def test_context_logger_adapter_merges_extra(self) -> None:
+        import logging
+        from pipeline.logging import ContextLoggerAdapter
+
+        logger = logging.getLogger("test_adapter")
+        adapter = ContextLoggerAdapter(logger, {"service": "ingestion", "base_field": "val1"})
+        msg, kwargs = adapter.process("test message", {"extra": {"error": "my_error", "code": 500}})
+        self.assertEqual(kwargs["extra"]["service"], "ingestion")
+        self.assertEqual(kwargs["extra"]["base_field"], "val1")
+        self.assertEqual(kwargs["extra"]["error"], "my_error")
+        self.assertEqual(kwargs["extra"]["code"], 500)
+
+    async def test_poll_recent_videos_raises_when_client_unauthorized(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            state_repository = PipelineStateRepository(temp_path / "pipeline.db")
+            alert_service = RecordingAlertService()
+            service = IngestionService(
+                storage=LocalArtifactStorage(temp_path),
+                state_repository=state_repository,
+                alert_service=alert_service,
+            )
+            listener = TelethonIngestionListener(
+                api_id=1,
+                api_hash="hash",
+                session_name="session",
+                channel_id="emamoathen",
+                ingestion_service=service,
+            )
+
+            class UnauthorizedClient:
+                def is_connected(self) -> bool:
+                    return True
+                async def connect(self) -> None:
+                    pass
+                async def is_user_authorized(self) -> bool:
+                    return False
+                async def disconnect(self) -> None:
+                    pass
+
+            listener._create_client = lambda: UnauthorizedClient()
+
+            with self.assertRaises(RuntimeError) as ctx:
+                await listener.poll_recent_videos(limit=5)
+            self.assertIn("Telegram client is not authorized", str(ctx.exception))
+            self.assertIn("TELEGRAM_SESSION_STRING", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

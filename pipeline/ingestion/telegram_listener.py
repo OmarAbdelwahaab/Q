@@ -10,8 +10,33 @@ from pipeline.ingestion.service import IngestionResult, IngestionService, Incomi
 from pipeline.logging import get_logger
 
 
+def normalize_telegram_target(target: str | int) -> int | str:
+    """Normalize Telegram channel/chat identifier for Telethon resolution.
+
+    - Numeric strings (e.g. "-100123456789" or "123456789") -> int
+    - URLs (e.g. "https://t.me/channel" or "t.me/channel") -> "@channel"
+    - Bare usernames (e.g. "channel") -> "@channel"
+    - Pre-formatted usernames (e.g. "@channel") -> "@channel"
+    """
+    if isinstance(target, int):
+        return target
+    s = str(target).strip()
+    if s.startswith("-") and s[1:].isdigit():
+        return int(s)
+    if s.isdigit():
+        return int(s)
+    if s.startswith("https://t.me/"):
+        s = s[len("https://t.me/"):]
+    elif s.startswith("http://t.me/"):
+        s = s[len("http://t.me/"):]
+    elif s.startswith("t.me/"):
+        s = s[len("t.me/"):]
+    s = s.lstrip("@")
+    return f"@{s}" if s else target
+
+
 class TelethonIngestionListener:
-    """Subscribe to a channel and pass video posts into the ingestion service."""
+    """Listen for incoming videos via Telethon user or bot account."""
 
     def __init__(
         self,
@@ -65,7 +90,8 @@ class TelethonIngestionListener:
         else:
             await client.start()
 
-        @client.on(events.NewMessage(chats=self.channel_id))
+        target = normalize_telegram_target(self.channel_id)
+        @client.on(events.NewMessage(chats=target))
         async def handle_new_message(event: Any) -> None:
             await self.process_message(event.message, event.chat_id)
 
@@ -81,14 +107,41 @@ class TelethonIngestionListener:
             raise ValueError("Telegram listener configuration is incomplete.")
 
         client = self._create_client()
-        if self.bot_token:
-            await client.start(bot_token=self.bot_token)
-        else:
-            await client.start()
 
+        # In headless CI environments, verify authorization to avoid EOFError on input()
+        if hasattr(client, "is_user_authorized"):
+            if hasattr(client, "is_connected") and not client.is_connected():
+                await client.connect()
+            if not await client.is_user_authorized():
+                if hasattr(client, "disconnect"):
+                    await client.disconnect()
+                raise RuntimeError(
+                    "Telegram client is not authorized. In headless CI environments (like GitHub Actions), "
+                    "a valid TELEGRAM_SESSION_STRING is required. Run 'python scripts/generate_session_string.py' "
+                    "locally on your computer to log in and generate the string, then add it to GitHub Secrets."
+                )
+
+        if hasattr(client, "start"):
+            if self.bot_token:
+                await client.start(bot_token=self.bot_token)
+            else:
+                await client.start()
+
+        target = normalize_telegram_target(self.channel_id)
         results: list[IngestionResult] = []
         try:
-            channel = await client.get_entity(self.channel_id)
+            try:
+                channel = await client.get_entity(target)
+            except Exception as exc:
+                self.logger.error(
+                    "Failed to find Telegram channel or chat entity",
+                    extra={"channel_id": self.channel_id, "target": str(target), "error": str(exc)},
+                )
+                raise RuntimeError(
+                    f"Could not resolve Telegram entity '{self.channel_id}' (target: '{target}'): {exc}. "
+                    "Ensure the channel username or numeric ID is correct and accessible."
+                ) from exc
+
             async for message in client.iter_messages(channel, limit=limit):
                 if not getattr(message, "video", None):
                     continue

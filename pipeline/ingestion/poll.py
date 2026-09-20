@@ -55,10 +55,12 @@ async def poll_main(argv: list[str] | None = None) -> int:
         )
         return 0
     except Exception as exc:
-        logger.error(
-            "Batch poll encountered an unhandled error",
-            extra={"error": str(exc)},
+        logger.exception(
+            "Batch poll encountered an unhandled error: %s",
+            exc,
+            extra={"error": str(exc), "error_type": type(exc).__name__},
         )
+        print(f"::error title=Batch Poll Failed::{type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
 
 
