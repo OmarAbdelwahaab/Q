@@ -58,25 +58,13 @@ def build_ingestion_listener(
         ingestion_service=ingestion_service,
         bot_token=settings.telegram_bot_token,
         on_ingested=on_ingested,
+        session_string=settings.telegram_session_string,
     )
 
 
 async def main() -> None:
     settings = IngestionSettings.from_env()
     configure_logging(service_name="ingestion", level=settings.log_level)
-
-    port_env = os.getenv("PORT")
-    if port_env:
-        try:
-            from pipeline.ingestion.web import start_background_web_server
-
-            start_background_web_server(int(port_env), settings.storage_root)
-        except Exception as exc:
-            logger = get_logger(__name__, service="ingestion")
-            logger.warning(
-                "Failed to start background web server", extra={"error": str(exc)}
-            )
-
     listener = build_ingestion_listener(settings)
     await listener.start()
 

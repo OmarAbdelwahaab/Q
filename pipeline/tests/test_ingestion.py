@@ -202,40 +202,104 @@ class IngestionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result.status, "failed")
             self.assertEqual(orchestrated_ids, [])
 
-    def test_background_web_server_health_and_media(self) -> None:
-        import urllib.request
-        from pipeline.ingestion.web import start_background_web_server
-
+    def test_listener_initialization_with_session_string(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
-            render_dir = temp_path / "render"
-            render_dir.mkdir(parents=True)
-            (render_dir / "test.mp4").write_bytes(b"dummy mp4 content")
+            service = IngestionService(
+                storage=LocalArtifactStorage(temp_path),
+                state_repository=PipelineStateRepository(temp_path / "pipeline.db"),
+                alert_service=RecordingAlertService(),
+            )
+            listener = TelethonIngestionListener(
+                api_id=12345,
+                api_hash="abcde",
+                session_name="my_session",
+                channel_id="emamoathen",
+                ingestion_service=service,
+                session_string="1BVtsOH...",
+            )
+            self.assertEqual(listener.session_string, "1BVtsOH...")
+            self.assertEqual(listener.session_name, "my_session")
 
-            # Start web server on an ephemeral OS-assigned port (e.g. 0 or high port)
-            import socket
-            sock = socket.socket()
-            sock.bind(("", 0))
-            free_port = sock.getsockname()[1]
-            sock.close()
+    async def test_poll_recent_videos_skips_existing_and_processes_new(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            state_repo = PipelineStateRepository(temp_path / "pipeline.db")
+            # Mark message 501 as already completed
+            state_repo.upsert_stage(501, "ingestion", "completed")
 
-            server = start_background_web_server(free_port, temp_path)
-            try:
-                # 1. Health endpoint
-                health_url = f"http://127.0.0.1:{free_port}/health"
-                with urllib.request.urlopen(health_url, timeout=5) as response:
-                    self.assertEqual(response.status, 200)
-                    body = response.read().decode("utf-8")
-                    self.assertIn("quran-pipeline", body)
+            service = IngestionService(
+                storage=LocalArtifactStorage(temp_path),
+                state_repository=state_repo,
+                alert_service=RecordingAlertService(),
+            )
 
-                # 2. Static media endpoint via /render/test.mp4
-                media_url = f"http://127.0.0.1:{free_port}/render/test.mp4"
-                with urllib.request.urlopen(media_url, timeout=5) as response:
-                    self.assertEqual(response.status, 200)
-                    self.assertEqual(response.read(), b"dummy mp4 content")
-            finally:
-                server.shutdown()
-                server.server_close()
+            processed_ids: list[int] = []
+
+            async def mock_on_ingested(message_id: int) -> None:
+                processed_ids.append(message_id)
+
+            listener = TelethonIngestionListener(
+                api_id=1,
+                api_hash="hash",
+                session_name="session",
+                channel_id="channel",
+                ingestion_service=service,
+                on_ingested=mock_on_ingested,
+            )
+
+            # Create mock client for poll_recent_videos
+            class FakeChannel:
+                id = -1001234567890
+
+            async def dl_501(f: str) -> str:
+                Path(f).write_bytes(b"data")
+                return f
+
+            async def dl_503(f: str) -> str:
+                Path(f).write_bytes(b"data-503")
+                return f
+
+            class MockClient:
+                async def start(self, **kwargs) -> None:
+                    pass
+
+                async def get_entity(self, channel_id: str) -> FakeChannel:
+                    return FakeChannel()
+
+                async def iter_messages(self, channel: Any, limit: int = 10):
+                    # Message 501 (already completed)
+                    yield FakeTelegramMessage(501, 30, dl_501)
+                    # Message 502 (text only, no video)
+                    msg_text = SimpleNamespace(id=502, video=None, date=None)
+                    yield msg_text
+                    # Message 503 (new video)
+                    yield FakeTelegramMessage(503, 45, dl_503)
+
+                async def disconnect(self) -> None:
+                    pass
+
+            listener._create_client = lambda: MockClient()  # type: ignore[method-assign]
+
+            results = await listener.poll_recent_videos(limit=5)
+            # Only message 503 should be processed!
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0].message_id, 503)
+            self.assertEqual(processed_ids, [503])
+            self.assertEqual((temp_path / "raw" / "503.mp4").read_bytes(), b"data-503")
+
+    async def test_poll_main_cli_success(self) -> None:
+        from pipeline.ingestion.poll import poll_main
+        from unittest.mock import patch, AsyncMock
+
+        with patch("pipeline.ingestion.poll.build_ingestion_listener") as mock_builder:
+            mock_listener = AsyncMock()
+            mock_listener.poll_recent_videos.return_value = []
+            mock_builder.return_value = mock_listener
+
+            exit_code = await poll_main(["--limit", "5"])
+            self.assertEqual(exit_code, 0)
+            mock_listener.poll_recent_videos.assert_awaited_once_with(limit=5)
 
 
 if __name__ == "__main__":

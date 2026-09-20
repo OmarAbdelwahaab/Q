@@ -35,6 +35,7 @@ class IngestionSettings:
     telegram_bot_token: str | None
     telegram_channel_id: str
     telegram_session_name: str
+    telegram_session_string: str | None
     state_db_path: Path
     storage_root: Path
     alert_webhook_url: str | None
@@ -67,6 +68,7 @@ class IngestionSettings:
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN") or None,
             telegram_channel_id=os.getenv("TELEGRAM_CHANNEL_ID", ""),
             telegram_session_name=os.getenv("TELEGRAM_SESSION_NAME", "pipeline_ingestion"),
+            telegram_session_string=os.getenv("TELEGRAM_SESSION_STRING") or None,
             state_db_path=state_db_path,
             storage_root=storage_root,
             alert_webhook_url=os.getenv("ALERT_WEBHOOK_URL") or None,
