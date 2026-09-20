@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quran-video-pipeline"
+version = "0.1.0"
+description = "Automated Quran video repurposing and publishing pipeline."
+readme = "SPEC.md"
+requires-python = ">=3.11"
+dependencies = [
+  "telethon>=1.39,<2",
+  "uharfbuzz>=0.40.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+  "pytest-asyncio>=0.23.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["pipeline*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+asyncio_mode = "auto"

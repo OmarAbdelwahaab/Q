@@ -1,0 +1,170 @@
+{
+  "name": "Quran Video Pipeline - Orchestration",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "id": "11111111-1111-1111-1111-111111111111",
+      "name": "Telegram Video Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "command": "python -m pipeline.orchestration.app {{$('Telegram Video Trigger').item.json.message.message_id}} --json"
+      },
+      "id": "22222222-2222-2222-2222-222222222222",
+      "name": "Run Pipeline Orchestrator",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "continueOnFail": true,
+      "position": [
+        440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{$json[\"exitCode\"]}}",
+              "operation": "equal",
+              "value2": 2
+            }
+          ]
+        }
+      },
+      "id": "33333333-3333-3333-3333-333333333333",
+      "name": "Check Orchestration Exit Code",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        660,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.ALERT_WEBHOOK_URL}}",
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"event\": \"qa_gate_held\", \"message_id\": {{$('Telegram Video Trigger').item.json.message.message_id}}, \"status\": \"held_for_review\"}"
+      },
+      "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+      "name": "Alert QA Review Queue",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        880,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{$json[\"exitCode\"]}}",
+              "operation": "equal",
+              "value2": 0
+            }
+          ]
+        }
+      },
+      "id": "44444444-4444-4444-4444-444444444444",
+      "name": "Check Execution Succeeded",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        880,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.ALERT_WEBHOOK_URL}}",
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"event\": \"pipeline_failed\", \"message_id\": {{$('Telegram Video Trigger').item.json.message.message_id}}, \"exit_code\": {{$json[\"exitCode\"]}}, \"error\": \"{{$json[\"stderr\"] || $json[\"stdout\"] || 'Execution failed'}}\"}"
+      },
+      "id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+      "name": "Alert Pipeline Failure",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        1100,
+        460
+      ]
+    }
+  ],
+  "connections": {
+    "Telegram Video Trigger": {
+      "main": [
+        [
+          {
+            "node": "Run Pipeline Orchestrator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Pipeline Orchestrator": {
+      "main": [
+        [
+          {
+            "node": "Check Orchestration Exit Code",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Orchestration Exit Code": {
+      "main": [
+        [
+          {
+            "node": "Alert QA Review Queue",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Check Execution Succeeded",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Execution Succeeded": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Alert Pipeline Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "Quran Pipeline Error Handler"
+  },
+  "active": false
+}
