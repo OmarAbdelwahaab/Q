@@ -78,3 +78,51 @@ class RecognitionTests(unittest.TestCase):
             cache.write_text(json.dumps([{"surah": 1, "ayah": 1, "text": "بِسْمِ اللَّهِ"}], ensure_ascii=False), encoding="utf-8")
             corpus = QuranCorpus.load_or_fetch(cache, "https://invalid.example")
             self.assertEqual(corpus.verses[0].text, "بِسْمِ اللَّهِ")
+
+    def test_bundled_corpus_is_used_when_cache_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "cold_boot_cache.json"
+            self.assertFalse(cache.exists())
+            corpus = QuranCorpus.load_or_fetch(cache, "https://invalid.example-must-not-call")
+            self.assertEqual(len(corpus.verses), 6236)
+            self.assertTrue(cache.exists())
+            self.assertEqual(corpus.verses[0].surah, 1)
+            self.assertEqual(corpus.verses[0].ayah, 1)
+
+    def test_whisper_transcriber_requires_api_key_for_cloud(self) -> None:
+        from pipeline.recognition.asr import WhisperTranscriber
+
+        transcriber = WhisperTranscriber("https://api.groq.com/openai/v1/audio/transcriptions", None, "whisper-large-v3")
+        with tempfile.TemporaryDirectory() as directory:
+            fake_audio = Path(directory) / "audio.wav"
+            fake_audio.write_bytes(b"dummy audio")
+            with self.assertRaises(TranscriptionError) as ctx:
+                transcriber.transcribe(fake_audio)
+            self.assertIn("ASR_API_KEY is not configured", str(ctx.exception))
+
+    def test_whisper_transcriber_formats_http_error_with_body(self) -> None:
+        import io
+        import urllib.error
+        from unittest.mock import patch
+        from pipeline.recognition.asr import WhisperTranscriber
+
+        transcriber = WhisperTranscriber("https://api.groq.com/openai/v1/audio/transcriptions", "gsk_test123", "whisper-large-v3")
+        with tempfile.TemporaryDirectory() as directory:
+            fake_audio = Path(directory) / "audio.wav"
+            fake_audio.write_bytes(b"dummy audio")
+
+            err_body = io.BytesIO(b'{"error": {"message": "Invalid API Key provided"}}')
+            http_err = urllib.error.HTTPError(
+                url="https://api.groq.com/openai/v1/audio/transcriptions",
+                code=401,
+                msg="Unauthorized",
+                hdrs={},
+                fp=err_body,
+            )
+
+            with patch("urllib.request.urlopen", side_effect=http_err):
+                with self.assertRaises(TranscriptionError) as ctx:
+                    transcriber.transcribe(fake_audio)
+                self.assertIn("401", str(ctx.exception))
+                self.assertIn("Invalid API Key provided", str(ctx.exception))
+                self.assertIn("Verify that ASR_API_KEY is correctly set", str(ctx.exception))

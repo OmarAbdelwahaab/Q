@@ -59,6 +59,26 @@ jobs:
             echo "No prior pipeline-state branch found; starting with fresh database."
           fi
 
+      - name: Validate Required Secrets and Configuration
+        run: |
+          MISSING=""
+          if [ -z "${{ secrets.ASR_API_KEY }}" ]; then
+            echo "::error title=Missing Secret::Secret 'ASR_API_KEY' is missing or empty! Please add your Groq API key in Settings -> Secrets and variables -> Actions."
+            MISSING="1"
+          fi
+          if [ -z "${{ secrets.TELEGRAM_API_ID }}" ]; then
+            echo "::error title=Missing Secret::Secret 'TELEGRAM_API_ID' is missing or empty! Please add your Telegram API ID in Settings -> Secrets and variables -> Actions."
+            MISSING="1"
+          fi
+          if [ -z "${{ secrets.TELEGRAM_API_HASH }}" ]; then
+            echo "::error title=Missing Secret::Secret 'TELEGRAM_API_HASH' is missing or empty! Please add your Telegram API Hash in Settings -> Secrets and variables -> Actions."
+            MISSING="1"
+          fi
+          if [ -n "$MISSING" ]; then
+            echo "::error::Required secrets are missing. Stopping workflow before executing pipeline."
+            exit 1
+          fi
+
       - name: Run Autonomous Ingestion & Pipeline Poller
         env:
           TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}

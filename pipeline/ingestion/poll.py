@@ -35,6 +35,17 @@ async def poll_main(argv: list[str] | None = None) -> int:
         extra={"channel_id": settings.telegram_channel_id, "limit": args.limit},
     )
 
+    if settings.auto_orchestrate:
+        import os
+        asr_key = os.environ.get("ASR_API_KEY", "").strip()
+        asr_url = os.environ.get("ASR_API_URL", "https://api.groq.com/openai/v1/audio/transcriptions")
+        if not asr_key and not any(h in asr_url for h in ("localhost", "127.0.0.1", "testserver")):
+            logger.error(
+                "ASR_API_KEY is missing or empty while AUTO_ORCHESTRATE is enabled. "
+                "Configure ASR_API_KEY in your environment or GitHub Secrets to enable recognition."
+            )
+            return 1
+
     listener = build_ingestion_listener(settings)
     try:
         results = await listener.poll_recent_videos(limit=args.limit)

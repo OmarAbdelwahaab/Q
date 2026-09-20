@@ -26,10 +26,26 @@ class QuranCorpus:
     def load_or_fetch(cls, cache_path: Path, api_base_url: str) -> "QuranCorpus":
         if cache_path.is_file():
             return cls._from_json(cache_path.read_text(encoding="utf-8"))
+
+        bundled_path = Path(__file__).resolve().parent.parent / "assets" / "corpus" / "quran-uthmani.json"
+        if bundled_path.is_file():
+            content = bundled_path.read_text(encoding="utf-8")
+            try:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                cache_path.write_text(content, encoding="utf-8")
+            except OSError:
+                pass
+            return cls._from_json(content)
+
+        headers = {
+            "User-Agent": "QuranPipeline/1.0",
+            "Accept": "application/json",
+        }
         verses: list[CanonicalVerse] = []
         for surah in range(1, 115):
             query = urllib.parse.urlencode({"chapter_number": surah})
-            with urllib.request.urlopen(f"{api_base_url}?{query}", timeout=30) as response:
+            request = urllib.request.Request(f"{api_base_url}?{query}", headers=headers)
+            with urllib.request.urlopen(request, timeout=30) as response:
                 payload = json.load(response)
             for verse in payload.get("verses", []):
                 chapter, ayah = verse["verse_key"].split(":", 1)

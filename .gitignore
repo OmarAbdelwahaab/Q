@@ -5,4 +5,5 @@ venv/
 .env
 *.db
 *.sqlite
-corpus/
+storage/corpus/
+!pipeline/assets/corpus/

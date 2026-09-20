@@ -301,6 +301,15 @@ class IngestionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(exit_code, 0)
             mock_listener.poll_recent_videos.assert_awaited_once_with(limit=5)
 
+    async def test_poll_main_fails_fast_on_missing_asr_key_when_auto_orchestrating(self) -> None:
+        import os
+        from unittest.mock import patch
+        from pipeline.ingestion.poll import poll_main
+
+        with patch.dict(os.environ, {"AUTO_ORCHESTRATE": "true", "ASR_API_KEY": "", "ASR_API_URL": "https://api.groq.com/openai/v1/audio/transcriptions"}, clear=False):
+            exit_code = await poll_main(["--limit", "5"])
+            self.assertEqual(exit_code, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
