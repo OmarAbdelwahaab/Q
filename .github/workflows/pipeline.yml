@@ -94,6 +94,7 @@ jobs:
           ALIGNMENT_MODEL: "jonatasgrosman/wav2vec2-large-xlsr-53-arabic"
           ALIGNMENT_DEVICE: "cpu"
           CTC_ALIGNMENT_DEVICE: "cpu"
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
           BRANDING_HANDLE: ${{ vars.BRANDING_HANDLE || '@YourChannel' }}
           PUBLISH_DRAFT_MODE: ${{ vars.PUBLISH_DRAFT_MODE || 'true' }}
           ALERT_TELEGRAM_BOT_TOKEN: ${{ secrets.ALERT_TELEGRAM_BOT_TOKEN }}

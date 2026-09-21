@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Protocol
 
-from pipeline.alignment.ctc import AlignedWord, AlignmentError
+from pipeline.alignment.ctc import AlignedWord, AlignmentError, prepare_alignment_words
 from pipeline.logging import get_logger
 
 
@@ -47,9 +47,9 @@ class AlignmentService:
         try:
             match = json.loads(match_artifact.read_text(encoding="utf-8"))
             canonical_text = match["canonical_text"]
-            expected_words = canonical_text.split()
+            expected_words, _ = prepare_alignment_words(canonical_text)
             words = self.aligner.align(source, canonical_text)
-            coverage = round(len(words) / len(expected_words), 4)
+            coverage = round(len(words) / len(expected_words), 4) if expected_words else 0.0
             destination = self.storage_root / "align" / f"{message_id}.json"
             destination.parent.mkdir(parents=True, exist_ok=True)
             temporary = destination.with_suffix(".partial.json")

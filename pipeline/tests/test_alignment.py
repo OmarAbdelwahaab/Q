@@ -111,3 +111,89 @@ class AlignmentTests(unittest.TestCase):
             settings = AlignmentSettings.from_env()
             self.assertEqual(settings.alignment_device, "cpu")
 
+    def test_prepare_alignment_words_merges_isolated_liturgical_marks(self) -> None:
+        from pipeline.alignment.ctc import prepare_alignment_words, WAV2VEC2_ARABIC_VOCAB
+
+        # Sajdah mark at end (13:15)
+        text_13_15 = "بِالْغُدُوِّ وَالآصَالِ ۩"
+        disp, ctc = prepare_alignment_words(text_13_15)
+        self.assertEqual(len(disp), 2)
+        self.assertEqual(len(ctc), 2)
+        self.assertEqual(disp[-1], "وَالآصَالِ ۩")
+        self.assertEqual(ctc[-1], "وَالآصَالِ")
+
+        # Permissible pause mark in middle (9:123)
+        text_9_123 = "غِلْظَةً ۚ وَاعْلَمُوا"
+        disp, ctc = prepare_alignment_words(text_9_123)
+        self.assertEqual(len(disp), 2)
+        self.assertEqual(len(ctc), 2)
+        self.assertEqual(disp[0], "غِلْظَةً ۚ")
+        self.assertEqual(ctc[0], "غِلْظَةً")
+
+        # Rub el Hizb at start
+        text_rub = "۞ إِنَّ اللَّهَ"
+        disp, ctc = prepare_alignment_words(text_rub)
+        self.assertEqual(len(disp), 2)
+        self.assertEqual(len(ctc), 2)
+        self.assertEqual(disp[0], "۞ إِنَّ")
+        self.assertEqual(ctc[0], "إِنَّ")
+
+    def test_prepare_alignment_words_strictly_normalizes_to_wav2vec2_vocab(self) -> None:
+        from pipeline.alignment.ctc import prepare_alignment_words, WAV2VEC2_ARABIC_VOCAB
+
+        # Quranic text containing alef wasla (ٱ), dagger alef (ٰ), silent zero (۟), madda (ٓ), small waw (ۥ)
+        verse_text = "يَـٰٓأَيُّهَا ٱلَّذِينَ ءَامَنُوا۟ قَـٰتِلُوا۟ إِنَّهُۥ"
+        disp, ctc = prepare_alignment_words(verse_text)
+        self.assertEqual(len(disp), len(ctc))
+        for word in ctc:
+            for char in word:
+                self.assertIn(char, WAV2VEC2_ARABIC_VOCAB, f"Char {ascii(char)} not in vocab")
+
+        # Verify silent rounded zero (۟) is stripped
+        self.assertIn("ءَامَنُوا۟", disp[2])
+        self.assertNotIn("\u06df", ctc[2])
+        self.assertEqual(ctc[2], "ءَامَنُوا")
+
+    def test_ctc_adapter_passes_sanitized_text_and_retains_display_words(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            audio = Path(directory) / "audio.wav"
+            write_wav(audio)
+            sent_text: list[str] = []
+
+            def runner(command):
+                text_content = Path(command[4]).read_text(encoding="utf-8")
+                sent_text.append(text_content)
+                Path(command[2]).with_suffix(".json").write_text(
+                    json.dumps([{"start": 0.0, "end": 0.5}]), encoding="utf-8"
+                )
+                from subprocess import CompletedProcess
+                return CompletedProcess(command, 0, "", "")
+
+            # Verse with sajdah mark
+            words = CtcForcedAligner(runner=runner).align(audio, "وَالآصَالِ ۩")
+            self.assertEqual(len(words), 1)
+            # Text sent to aligner must not have non-vocab ۩
+            self.assertNotIn("۩", sent_text[0])
+            self.assertEqual(sent_text[0], "وَالآصَالِ")
+            # Returned AlignedWord must preserve original Uthmani display word with ۩
+            self.assertEqual(words[0].word, "وَالآصَالِ ۩")
+
+    def test_service_coverage_accurate_with_isolated_marks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_wav(root / "audio" / "503.wav")
+            (root / "match").mkdir()
+            (root / "match" / "503.json").write_text(
+                json.dumps({"canonical_text": "بِالْغُدُوِّ وَالآصَالِ ۩"}),
+                encoding="utf-8",
+            )
+            state, alerts = PipelineStateRepository(root / "state.db"), RecordingAlerts()
+            # 2 spoken words
+            mock_words = [AlignedWord("بِالْغُدُوِّ", 0, 400), AlignedWord("وَالآصَالِ ۩", 400, 900)]
+            service = AlignmentService(root, state, alerts, StubAligner(mock_words))
+            result = asyncio.run(service.align(503))
+            self.assertEqual(result.status, "completed")
+            # Coverage must be 1.0 (2 / 2), NOT 0.6667 (2 / 3)
+            self.assertEqual(result.coverage, 1.0)
+
+
