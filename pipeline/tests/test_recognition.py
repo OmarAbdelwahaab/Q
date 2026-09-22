@@ -126,3 +126,94 @@ class RecognitionTests(unittest.TestCase):
                 self.assertIn("401", str(ctx.exception))
                 self.assertIn("Invalid API Key provided", str(ctx.exception))
                 self.assertIn("Verify that ASR_API_KEY is correctly set", str(ctx.exception))
+
+    def test_normalize_arabic_preserves_alef_wasla(self) -> None:
+        # \u0671 is alef wasla (ٱ)
+        self.assertEqual(normalize_arabic("ٱلْحَمْدُ"), "الحمد")
+        self.assertEqual(normalize_arabic("ٱلَّذِينَ"), "الذين")
+        self.assertEqual(normalize_arabic("ٱسْتَعِينُوا"), "استعينوا")
+        self.assertEqual(normalize_arabic("ٱلسَّمَـٰوَٰتِ"), "السموت")
+
+    def test_multi_surah_prayer_sequence_matching(self) -> None:
+        corpus = QuranCorpus([
+            CanonicalVerse(1, 1, "بِسْمِ ٱللَّهِ ٱلرَّحْمَـٰنِ ٱلرَّحِيمِ"),
+            CanonicalVerse(1, 2, "ٱلْحَمْدُ لِلَّهِ رَبِّ ٱلْعَـٰلَمِينَ"),
+            CanonicalVerse(105, 1, "أَلَمْ تَرَ كَيْفَ فَعَلَ رَبُّكَ بِأَصْحَـٰبِ ٱلْفِيلِ"),
+            CanonicalVerse(105, 2, "أَلَمْ يَجْعَلْ كَيْدَهُمْ فِى تَضْلِيلٍ"),
+        ])
+        transcript = "الحمد لله رب العالمين آمين ألم تر كيف فعل ربك بأصحاب الفيل ألم يجعل كيدهم في تضليل"
+        match = QuranMatcher(corpus).match(transcript)
+        # Should identify Surah 105 as primary non-Fatiha surah
+        self.assertEqual(match.surah, 105)
+        self.assertEqual(match.ayah_start, 1)
+        self.assertEqual(match.ayah_end, 2)
+        self.assertGreaterEqual(match.confidence, 0.90)
+        # Canonical text must contain both Al-Fatiha and Al-Fil in order
+        self.assertIn("ٱلْحَمْدُ لِلَّهِ", match.canonical_text)
+        self.assertIn("بِأَصْحَـٰبِ ٱلْفِيلِ", match.canonical_text)
+
+    def test_repeated_ayah_matching(self) -> None:
+        corpus = QuranCorpus([
+            CanonicalVerse(106, 3, "فَلْيَعْبُدُوا۟ رَبَّ هَـٰذَا ٱلْبَيْتِ"),
+            CanonicalVerse(106, 4, "ٱلَّذِىٓ أَطْعَمَهُم مِّن جُوعٍ وَءَامَنَهُم مِّنْ خَوْفٍۭ"),
+        ])
+        # Reciter repeats 106:3 twice
+        transcript = "فليعبدوا رب هذا البيت فليعبدوا رب هذا البيت الذي أطعمهم من جوع وآمنهم من خوف"
+        match = QuranMatcher(corpus).match(transcript)
+        self.assertGreaterEqual(match.confidence, 0.90)
+        # Repeated ayah must appear twice in canonical_text
+        self.assertEqual(match.canonical_text.count("فَلْيَعْبُدُوا۟"), 2)
+
+    def test_partial_ayah_phrase_repetition(self) -> None:
+        corpus = QuranCorpus([
+            CanonicalVerse(5, 118, "إِن تُعَذِّبْهُمْ فَإِنَّهُمْ عِبَادُكَ ۖ وَإِن تَغْفِرْ لَهُمْ فَإِنَّكَ أَنتَ ٱلْعَزِيزُ ٱلْحَكِيمُ"),
+        ])
+        # Reciter recites full verse, then repeats the second phrase
+        transcript = "إن تعذبهم فإنهم عبادك وإن تغفر لهم فإنك أنت العزيز الحكيم وإن تغفر لهم فإنك أنت العزيز الحكيم"
+        match = QuranMatcher(corpus).match(transcript)
+        self.assertEqual(match.surah, 5)
+        self.assertEqual(match.ayah_start, 118)
+        self.assertEqual(match.ayah_end, 118)
+        self.assertGreaterEqual(match.confidence, 0.90)
+        self.assertEqual(match.canonical_text.count("وَإِن تَغْفِرْ لَهُمْ"), 2)
+
+    def test_skipped_verses_matching(self) -> None:
+        corpus = QuranCorpus([
+            CanonicalVerse(23, 84, "قُل لِّمَنِ ٱلْأَرْضُ وَمَن فِيهَآ إِن كُنتُمْ تَعْلَمُونَ"),
+            CanonicalVerse(23, 85, "سَيَقُولُونَ لِلَّهِ ۚ قُلْ أَفَلَا تَذَكَّرُونَ"),
+            CanonicalVerse(23, 86, "قُلْ مَن رَّبُّ ٱلسَّمَـٰوَٰتِ ٱلسَّبْعِ وَرَبُّ ٱلْعَرْشِ ٱلْعَظِيمِ"),
+            CanonicalVerse(23, 89, "سَيَقُولُونَ لِلَّهِ ۚ قُلْ فَأَنَّىٰ تُسْحَرُونَ"),
+        ])
+        # Recites 84, 85, then skips to 89
+        transcript = "قل لمن الأرض ومن فيها إن كنتم تعلمون سيقولون لله قل أفلا تذكرون سيقولون لله قل فأنا تسحرون"
+        match = QuranMatcher(corpus).match(transcript)
+        self.assertEqual(match.surah, 23)
+        self.assertEqual(match.ayah_start, 84)
+        self.assertEqual(match.ayah_end, 89)
+        self.assertGreaterEqual(match.confidence, 0.90)
+        self.assertIn("قُل لِّمَنِ ٱلْأَرْضُ", match.canonical_text)
+        self.assertIn("قُلْ فَأَنَّىٰ تُسْحَرُونَ", match.canonical_text)
+        # 86 was not recited, so it must not be in canonical text
+        self.assertNotIn("ٱلسَّمَـٰوَٰتِ ٱلسَّبْعِ", match.canonical_text)
+
+    def test_live_message_13506_and_13509_transcripts(self) -> None:
+        bundled = Path(__file__).resolve().parent.parent / "assets" / "corpus" / "quran-uthmani.json"
+        if not bundled.is_file():
+            self.skipTest("Bundled corpus not present")
+        corpus = QuranCorpus._from_json(bundled.read_text(encoding="utf-8"))
+        matcher = QuranMatcher(corpus)
+
+        # Message 13509 (2-rak'ah prayer with repeated 106:3)
+        t13509 = "الحمد لله رب العالمين الرحمن الرحيم مالك يوم الدين إياك نعبد وإياك نستعين إهدنا الصراط المستقيم صراط الذين أنعمت عليهم غير المغضوب عليهم ولا الضالين آمين ألم تر كيف فعل ربك بأصحاب الفيل ألم يجعل كيدهم في تضليل وأرسل عليهم طيرا أبابيل ترميهم بحجارة من سجيل مالك يوم الدين إياك نعبد وإياك نستعين إهدنا الصراط المستقيم صراط الذين أنعمت عليهم غير المغضوب عليهم ولا الضالين آمين لإلاف قريش إلافهم رحلة الشتاء والصيف فليعبدوا رب هذا البيت فليعبدوا رب هذا البيت الذي أطعمهم من جوع وآمنهم من خوف"
+        m13509 = matcher.match(t13509)
+        self.assertGreaterEqual(m13509.confidence, 0.90)
+        self.assertEqual(m13509.canonical_text.count("فَلْيَعْبُدُوا۟"), 2)
+
+        # Message 13506 (41 verses with skips)
+        t13506 = "الحمد لله رب العالمين الرحمن الرحيم مالك يوم الدين إياك نعبد وإياك نستعين اهدنا الصراط المستقيم صراط الذين أنعمت عليهم غير المغضوب عليهم ولا الظالين آمين وهو الذي أنشأ لكم السمع والأبصار والأفئدة قليلا ما تشكرون وهو الذي ذرأكم في الأرض وإليه تحشرون وهو الذي يحيي ويميت وله اختلاف الليل والنهار أفلا تعقلون بل قالوا مثل ما قال الأولون قالوا أئذا متنا وكنا ترابا وعظاما أئنا لمبعوثون لقد وعدنا نحن وآباؤنا هذا من قبل إن هذا إلا أساطير الأولين قل لمن الأرض ومن فيها إن كنتم تعلمون سيقولون لله قل أفلا تذكرون سيقولون لله قل فأنا تسحرون بل أتيناهم بالحق وإنهم لكاذبون ما اتخذ الله من ولد وما كان معه من إله إذا لذهب كل إله بما خلق ولعلى بعضهم على بعض سبحان الله عما يصفون عالم الغيب والشهادة فتعالى عما يشركون قل رب إما تريني ما يوعدون رب فلا تجعلني في القوم الظالمين وإنا على أن نريك ما نعدهم لقادرون ادفع بالتي هي أحسن السيئة نحن أعلم بما يصيفون وقل رب أعوذ بك من همزات الشياطين وأعوذ بك رب أن يحضرون حتى إذا جاء أحدهم الموت قال رب ارجعون لعلي أعمل صالحا فيما تركت فإذا نفخ في الصور فلا أنساب بينهم يومئذ ولا يتساءلون فمن ثقلت موازينه فأولئك هم المفلحون ومن خفت موازينه فأولئك الذين خسروا أنفسهم في جهنم خالدون تلفح وجوههم النار وهم فيها كالحون ألم تكن آياتي تتلى عليكم فكنتن بها تكذبون قالوا ربنا غلبت علينا شقوتنا وكنا قوما ضالين ربنا أخرجنا منها فإن عدنا فإنا ظالمون قال اخسأوا فيها ولا تكلمون إني جزيتهم اليوم بما صبروا أنهم هم الفائزون قال كم لبثتم في الأرض عدد سنين قالوا لبثنا يوما أو بعض يوم فاسأل العادين قال إن لبثتم إلا قليلا لو أنكم كنتم تعلمون أفحسبتم أنما خلقناكم عبثا وأنكم إلينا لا ترجعون فتعالى الله الملك الحق لا إله إلا هو رب العرش الكريم ومن يدعو مع الله إلها آخر لا برهان له به فإنما حسابه عند ربه إنه لا يفلح الكافرون وقل رب اغفر وارحم وأنت خير الراحمين"
+        m13506 = matcher.match(t13506)
+        self.assertEqual(m13506.surah, 23)
+        self.assertEqual(m13506.ayah_start, 78)
+        self.assertEqual(m13506.ayah_end, 118)
+        self.assertGreaterEqual(m13506.confidence, 0.90)
+
