@@ -110,6 +110,7 @@ class TelethonIngestionListener:
         self,
         limit: int = 10,
         max_downloads: int | None = None,
+        retry_held: bool = False,
     ) -> list[IngestionResult]:
         """Fetch recent channel messages, process any newly arrived videos, and return results."""
         if not self.api_id or not self.api_hash or not self.channel_id:
@@ -186,13 +187,22 @@ class TelethonIngestionListener:
                     message.id, "publish"
                 )
 
-                # Skip if already fully published, completed, or held for review by QA Gate
+                is_held = orch_stage and orch_stage.get("status") == "held_for_review"
+
+                # Skip if already fully published or completed
                 if (pub_stage and pub_stage.get("status") == "completed") or (
-                    orch_stage and orch_stage.get("status") in ("completed", "held_for_review")
+                    orch_stage and orch_stage.get("status") == "completed"
                 ):
                     self.logger.info(
                         "Skipping already processed message during poll",
                         extra={"message_id": message.id, "status": (pub_stage or orch_stage).get("status")},
+                    )
+                    continue
+
+                if is_held and not retry_held:
+                    self.logger.info(
+                        "Skipping held_for_review message during poll (use --retry-held to re-evaluate)",
+                        extra={"message_id": message.id},
                     )
                     continue
 
@@ -204,9 +214,9 @@ class TelethonIngestionListener:
                     continue
 
                 if self.on_ingested and ingest_stage and ingest_stage.get("status") == "completed":
-                    if orch_stage and orch_stage.get("status") == "failed":
+                    if orch_stage and (orch_stage.get("status") == "failed" or (is_held and retry_held)):
                         self.logger.info(
-                            "Retrying previously failed orchestration for message during poll",
+                            "Retrying previously failed or held orchestration for message during poll",
                             extra={"message_id": message.id},
                         )
                     elif not orch_stage or orch_stage.get("status") == "processing":
@@ -224,7 +234,9 @@ class TelethonIngestionListener:
                     break
 
                 chat_id = getattr(channel, "id", self.channel_id)
-                res = await self.process_message(message, chat_id)
+                res = await self.process_message(
+                    message, chat_id, force_orchestration=(is_held and retry_held)
+                )
                 if res:
                     results.append(res)
                     download_count += 1
@@ -233,7 +245,12 @@ class TelethonIngestionListener:
 
         return results
 
-    async def process_message(self, telegram_message: Any, chat_id: int | str) -> IngestionResult | None:
+    async def process_message(
+        self,
+        telegram_message: Any,
+        chat_id: int | str,
+        force_orchestration: bool = False,
+    ) -> IngestionResult | None:
         if not getattr(telegram_message, "video", None):
             return None
 
@@ -241,7 +258,12 @@ class TelethonIngestionListener:
         result = await self.ingestion_service.ingest(normalized_message)
         if result and result.status == "completed" and self.on_ingested:
             try:
-                await self.on_ingested(result.message_id)
+                import inspect
+                sig = inspect.signature(self.on_ingested)
+                if "force" in sig.parameters:
+                    await self.on_ingested(result.message_id, force=force_orchestration)
+                else:
+                    await self.on_ingested(result.message_id)
             except Exception as exc:
                 self.logger.error(
                     "Error executing on_ingested callback",

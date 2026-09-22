@@ -299,7 +299,7 @@ class IngestionTests(unittest.IsolatedAsyncioTestCase):
 
             exit_code = await poll_main(["--limit", "5", "--max-downloads", "3"])
             self.assertEqual(exit_code, 0)
-            mock_listener.poll_recent_videos.assert_awaited_once_with(limit=5, max_downloads=3)
+            mock_listener.poll_recent_videos.assert_awaited_once_with(limit=5, max_downloads=3, retry_held=False)
 
     async def test_poll_recent_videos_respects_max_downloads(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

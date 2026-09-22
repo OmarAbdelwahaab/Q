@@ -41,12 +41,15 @@ def build_ingestion_listener(
         orchestrator, _ = build_orchestrator(OrchestrationSettings.from_env())
         logger = get_logger(__name__, service="ingestion")
 
-        async def _trigger_orchestration(message_id: int) -> None:
+        async def _trigger_orchestration(message_id: int, force: bool = False) -> None:
             logger.info(
                 "Auto-triggering pipeline orchestration",
-                extra={"message_id": message_id},
+                extra={"message_id": message_id, "force": force},
             )
-            summary = await orchestrator.run(message_id)
+            if force:
+                summary = await orchestrator.run(message_id, force=force)
+            else:
+                summary = await orchestrator.run(message_id)
             logger.info(
                 "Pipeline orchestration completed",
                 extra={

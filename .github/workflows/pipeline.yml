@@ -18,6 +18,10 @@ on:
         description: 'Telegram Channel username (@channel), numeric ID (-100...), or private invite link'
         required: false
         default: 'moathemam'
+      retry_held:
+        description: 'Retry previously held/failed messages (e.g. 13506 and 13509)'
+        required: false
+        default: 'true'
 
 concurrency:
   group: quran-pipeline-execution
@@ -96,6 +100,8 @@ jobs:
           CTC_ALIGNMENT_DEVICE: "cpu"
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           BRANDING_HANDLE: ${{ vars.BRANDING_HANDLE || '@YourChannel' }}
+          PUBLISH_API_KEY: ${{ secrets.PUBLISH_API_KEY }}
+          PUBLISH_PLATFORMS: ${{ vars.PUBLISH_PLATFORMS || 'tiktok,instagram,youtube,facebook,x,telegram' }}
           PUBLISH_DRAFT_MODE: ${{ vars.PUBLISH_DRAFT_MODE || 'true' }}
           ALERT_TELEGRAM_BOT_TOKEN: ${{ secrets.ALERT_TELEGRAM_BOT_TOKEN }}
           ALERT_TELEGRAM_CHAT_ID: ${{ secrets.ALERT_TELEGRAM_CHAT_ID }}
@@ -103,7 +109,20 @@ jobs:
           PIPELINE_PROJECT_ROOT: "."
           PIPELINE_STORAGE_ROOT: "storage"
         run: |
-          python -m pipeline.ingestion.poll --limit ${{ github.event.inputs.limit || '10' }} --max-downloads ${{ github.event.inputs.max_downloads || '2' }}
+          RETRY_FLAG=""
+          if [ "${{ github.event.inputs.retry_held || 'true' }}" = "true" ]; then
+            RETRY_FLAG="--retry-held"
+          fi
+          python -m pipeline.ingestion.poll --limit ${{ github.event.inputs.limit || '10' }} --max-downloads ${{ github.event.inputs.max_downloads || '2' }} $RETRY_FLAG
+
+      - name: Upload Rendered Videos as Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rendered-videos
+          path: storage/render/*.mp4
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Persist Pipeline State Database to Git Branch
         if: always()

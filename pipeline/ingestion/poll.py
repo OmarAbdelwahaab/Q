@@ -27,6 +27,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=2,
         help="Maximum number of new videos to download and process per run (default: 2)",
     )
+    parser.add_argument(
+        "--retry-held",
+        action="store_true",
+        default=False,
+        help="Retry previously held_for_review messages with updated recognition logic",
+    )
     return parser.parse_args(argv)
 
 
@@ -42,6 +48,7 @@ async def poll_main(argv: list[str] | None = None) -> int:
             "channel_id": settings.telegram_channel_id,
             "limit": args.limit,
             "max_downloads": args.max_downloads,
+            "retry_held": args.retry_held,
         },
     )
 
@@ -61,6 +68,7 @@ async def poll_main(argv: list[str] | None = None) -> int:
         results = await listener.poll_recent_videos(
             limit=args.limit,
             max_downloads=args.max_downloads,
+            retry_held=args.retry_held,
         )
         logger.info(
             "Batch poll completed",
