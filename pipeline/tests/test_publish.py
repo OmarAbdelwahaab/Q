@@ -452,6 +452,70 @@ class PublishClientTests(unittest.TestCase):
             self.assertEqual(response.overall_status, "completed")
             self.assertEqual(response.results["instagram"].status, "published")
 
+    def test_http_client_sends_user_agent_header(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            video_file = Path(temp_dir) / "video.mp4"
+            video_file.write_bytes(b"content")
+
+            client = MultiPlatformPublishClient(
+                api_base_url="https://app.ayrshare.com/api",
+                api_key="test-key",
+            )
+            captured_headers: dict[str, str] = {}
+
+            async def _mock_send(url: str, headers: dict[str, str], body: bytes) -> dict[str, Any]:
+                nonlocal captured_headers
+                captured_headers = headers
+                return {"status": "success", "id": "test_1"}
+
+            with patch.object(client, "_send_http_request", side_effect=_mock_send):
+                request = PublishRequest(
+                    message_id=204,
+                    video_path=video_file,
+                    caption="Caption",
+                    platforms=("x",),
+                )
+                asyncio.run(client.publish(request))
+
+            self.assertIn("User-Agent", captured_headers)
+            self.assertIn("QuranVideoPipeline", captured_headers["User-Agent"])
+
+    def test_http_client_parses_json_error_detail(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            video_file = Path(temp_dir) / "video.mp4"
+            video_file.write_bytes(b"content")
+
+            client = MultiPlatformPublishClient(
+                api_base_url="https://app.ayrshare.com/api",
+                api_key="bad-key",
+                max_retries=1,
+            )
+
+            import io
+            err_body = b'{"action":"authorization","status":"error","code":102,"message":"API Key not valid"}'
+            fp = io.BytesIO(err_body)
+            err_403 = urllib.error.HTTPError(
+                url="https://app.ayrshare.com/api/post",
+                code=403,
+                msg="Forbidden",
+                hdrs={},
+                fp=fp,
+            )
+
+            with patch.object(client, "_send_http_request", side_effect=err_403):
+                request = PublishRequest(
+                    message_id=205,
+                    video_path=video_file,
+                    caption="Caption",
+                    platforms=("x",),
+                )
+                response = asyncio.run(client.publish(request))
+
+            self.assertEqual(response.overall_status, "failed")
+            self.assertIn("API Key not valid", response.error or "")
+            self.assertIn("API Key not valid", response.results["x"].error or "")
+
+
 
 # ---------------------------------------------------------------------------
 # 4. PublishService Tests (Idempotency, Media Upload, Alerts)

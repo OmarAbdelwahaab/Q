@@ -107,6 +107,11 @@ class MultiPlatformPublishClient:
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36 (QuranVideoPipeline/1.0)"
+            ),
         }
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
@@ -145,6 +150,21 @@ class MultiPlatformPublishClient:
                     response_text = exc.read().decode("utf-8")
                 except Exception:
                     pass
+
+                if response_text:
+                    try:
+                        err_payload = json.loads(response_text)
+                        if isinstance(err_payload, dict):
+                            detail_msg = (
+                                err_payload.get("message")
+                                or err_payload.get("detail")
+                                or err_payload.get("title")
+                                or err_payload.get("error")
+                            )
+                            if detail_msg:
+                                last_error = f"HTTP {exc.code} ({detail_msg})"
+                    except Exception:
+                        pass
 
                 self.logger.warning(
                     "Publish API HTTP error",
